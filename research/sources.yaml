@@ -1,0 +1,66 @@
+sources:
+  hacker_news:
+    type: hn
+    max_items: 50
+    enabled: true
+
+  github_repos:
+    type: github
+    repos:
+      - langchain-ai/langchain
+      - ollama/ollama
+      - run-llama/llama_index
+      - livekit/agents
+      - microsoft/autogen
+      - crewAIInc/crewAI
+      - openai/openai-python
+      - anthropics/anthropic-sdk-python
+      - huggingface/transformers
+      - vllm-project/vllm
+    enabled: true
+
+  rss_feeds:
+    type: rss
+    feeds:
+      - url: https://hnrss.org/newest?points=50
+        name: hn-top
+      - url: https://simonwillison.net/atom/everything/
+        name: simon-willison
+      - url: https://lilianweng.github.io/index.xml
+        name: lilian-weng
+      - url: https://karpathy.github.io/feed.xml
+        name: karpathy
+      - url: https://blog.langchain.dev/rss/
+        name: langchain-blog
+    max_items: 100
+    enabled: true
+
+  websites:
+    type: http
+    urls:
+      - url: https://arxiv.org/list/cs.AI/recent
+        selector: "dl#articles dt, dl#articles dd"
+        name: arxiv-ai
+      - url: https://arxiv.org/list/cs.CL/recent
+        selector: "dl#articles dt, dl#articles dd"
+        name: arxiv-cl
+      - url: https://huggingface.co/blog
+        selector: "article"
+        name: hf-blog
+    enabled: true
+
+  twitter:
+    type: nitter
+    proxy_url: https://nitter.privacydev.net
+    accounts:
+      - kaborobin
+      - ylecun
+      - AndrewYNg
+      - sama
+      - ClementDelworker
+      - _jasonwei
+    max_items: 200
+    enabled: true
+
+output:
+  raw_dir: research/raw
