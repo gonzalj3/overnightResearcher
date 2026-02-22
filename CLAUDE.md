@@ -392,3 +392,105 @@ All 8 tests passed in 128.63s (dominated by 5 Ollama inference calls).
 - **Inference speed**: ~20-25s per summary on M1 Pro. A full batch of 100+ sources would take ~40 minutes — acceptable for overnight runs.
 - **`format: "json"` reliability**: Ollama's constrained JSON output mode makes JSON repair rarely needed in practice, but the repair utility is there for edge cases.
 - **Batch manifest format**: `run_batch_summarize` expects `{"date":..., "items":[{"url":..., "content_hash":..., "content_path":...}]}`. This differs slightly from the Chunk 2 fetcher manifest (flat list). The Chunk 4+ orchestrator will bridge these formats.
+
+---
+
+## CHUNK 4: Knowledge Base & Persistent Memory
+
+**Date completed:** 2026-02-22
+
+### Purpose
+Store summaries and insights in a SQLite database that persists across nightly runs, enabling the agent to track trends, avoid re-processing, and improve relevance scoring over time.
+
+### What was done
+
+**Files created:**
+- `research/schema.sql` — SQLite schema with 3 tables (`sources`, `daily_reports`, `interest_feedback`) and 3 indexes (date, score, hash)
+- `research/db.py` — Database manager with 9 functions: `init_db`, `insert_source` (dedup via `INSERT OR IGNORE` on content_hash), `get_recent_sources`, `get_top_developments`, `is_already_processed`, `update_interest_weights`, `get_interest_weights`, `insert_daily_report`, `get_trending_topics`
+- `research/memory.py` — Memory context builder: `build_memory_context()` loads last 7 days of top developments, interest weights, and trending topics into a concise prompt block (< 1000 tokens)
+- `tests/test_db.py` — 7 tests covering all DB operations and memory builder
+
+**Key design decisions:**
+- `INSERT OR IGNORE` on `UNIQUE(content_hash)` for idempotent dedup
+- Interest weights auto-increment: `weight = 1.0 + (total_hits * 0.1)`
+- Memory context hard-capped at 3800 chars (~950 tokens) via truncation
+- `get_trending_topics` aggregates `relevance_tags` JSON arrays across all sources in the time window
+- `sqlite3.Row` row factory for dict-like access throughout
+- Default DB path: `research/research.db` (alongside source code, gitignored)
+
+### Test Results
+
+| Test | Result | Notes |
+|---|---|---|
+| 4.1 — DB schema init | **PASS** | All 3 tables created correctly |
+| 4.2 — Insert and retrieve | **PASS** | Source inserted and retrieved with correct title |
+| 4.3 — Deduplication | **PASS** | Duplicate content_hash ignored, only 1 row |
+| 4.4 — Interest weights | **PASS** | Two updates accumulate: total_hits=8 |
+| 4.5 — Trending topics | **PASS** | "AI agents" tag aggregated across 5 sources |
+| 4.6 — Memory context budget | **PASS** | 20 historical items produce context < 1000 tokens |
+| 4.7 — is_already_processed | **PASS** | Existing hash returns True, new hash returns False |
+
+All 7 tests passed in <1s.
+
+### Exit Criteria
+- All CRUD operations work
+- Deduplication prevents double-processing
+- Memory context < 1000 tokens
+- Interest weights accumulate across calls
+- All 7 tests pass
+
+---
+
+## CHUNK 5: Report Synthesis & Output
+
+**Date completed:** 2026-02-22
+
+### Purpose
+Take all per-source summaries + historical memory context and produce a final daily research report via a 3-pass LLM pipeline.
+
+### What was done
+
+**Files created:**
+- `research/synthesis.py` — 3-pass synthesis pipeline:
+  - `cluster_and_rank()` (Pass 1): Groups summaries by theme, selects top N items via LLM
+  - `synthesize_theme()` (Pass 2): Produces analysis paragraph per theme cluster via LLM
+  - `generate_executive_summary()` (Pass 3): Produces 3-5 bullet executive summary + watch list via LLM
+  - `run_synthesis()`: Orchestrator that runs all 3 passes and writes the final report
+  - `_llm_call()`: Shared Ollama `/api/generate` helper with `/no_think` prefix, `format: "json"`, `temperature: 0.2`
+- `research/report.py` — Report formatter and writer:
+  - `format_report()`: Produces structured markdown with Executive Summary, Watch List, Detailed Findings (per theme with sources), Statistics, and full Sources list
+  - `save_report()`: Writes to `~/reports/{date}.md`
+- `tests/test_synthesis.py` — 6 tests with mocked LLM calls for fast offline testing
+
+**Key design decisions:**
+- Tests use `unittest.mock.patch` on `_llm_call` — all 6 tests run in ~1s with no Ollama dependency
+- Fallback clustering: if LLM parse fails, returns single "General Findings" cluster with top items
+- Max 5 theme clusters synthesized (to stay within time/context budget)
+- Same Ollama direct API pattern as `summarizer.py` (`/no_think`, `format: "json"`, `num_ctx: 8192`)
+- Report includes dedup stats, processing time, and interest drift fields for future use
+
+### Test Results
+
+| Test | Result | Notes |
+|---|---|---|
+| 5.1 — Cluster & rank | **PASS** | Groups 4 summaries into themed clusters, top items included |
+| 5.2 — Deep synthesis | **PASS** | Produces analysis text > 50 chars with memory context |
+| 5.3 — Executive summary | **PASS** | Summary < 500 words with watch list |
+| 5.4 — Report format | **PASS** | Valid markdown with all required sections |
+| 5.5 — Report save | **PASS** | File written to disk and readable |
+| 5.6 — Full pipeline E2E | **PASS** | 10 summaries → report file on disk with ≥1 theme |
+
+All 6 tests passed in ~1s (mocked LLM).
+
+### Exit Criteria
+- 3-pass synthesis pipeline completes (mocked: <1s; live: estimated <10min for 50 summaries)
+- Report is readable, well-structured markdown
+- Executive summary is < 500 words
+- Report saves to disk
+- All 6 tests pass
+
+### Known Issues / Notes
+- **Live LLM testing**: Tests use mocked LLM responses. Live testing against Ollama/Qwen3 should be done manually or via integration tests when Ollama is running.
+- **Cluster enrichment**: `cluster_and_rank` attempts to match LLM-returned titles back to full summary objects. If titles don't match exactly, the compact LLM-returned items are used instead.
+- **Report DB integration**: `insert_daily_report` is implemented in `db.py` but not yet called from `run_synthesis`. The orchestrator (future chunk) will wire this up.
+- **Stats placeholders**: `sources_skipped`, `fetch_errors`, and `processing_time` in the report are placeholders — the orchestrator will populate these with real values.
