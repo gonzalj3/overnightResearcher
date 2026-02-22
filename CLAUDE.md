@@ -341,3 +341,54 @@ pip install pyyaml requests feedparser beautifulsoup4 html2text pytest lxml
 - **Nitter availability**: Nitter proxies go up and down. Test 2.9 is lenient. Multiple proxy URLs may be needed in production.
 - **GitHub rate limits**: Unauthenticated GitHub API allows 60 req/hour. For 10 repos this is fine; for more, set `GITHUB_TOKEN` env var (not yet implemented).
 - **No concurrency**: Fetches are sequential (single-threaded). Acceptable for overnight batch; could add `concurrent.futures` if speed matters.
+
+---
+
+## CHUNK 3: LLM Summarization Pipeline
+
+**Date completed:** 2026-02-22
+
+### Purpose
+Per-source summarization using Qwen3 32B via Ollama's direct HTTP API. Processes one source at a time with minimal prompts, outputs structured JSON.
+
+### What was done
+
+**Files created:**
+- `research/json_repair.py` — JSON repair utility: strips markdown fences, fixes trailing commas, fixes single quotes, regex extraction fallback, sentinel on failure
+- `research/summarizer.py` — `summarize_source()` calls Ollama `/api/generate` with `format: "json"`, `temperature: 0.1`, `num_ctx: 8192`. Uses `/no_think` prefix to skip Qwen3 reasoning. `run_batch_summarize()` iterates manifest with resume support (skips already-summarized items by content_hash). `build_prompt()` constructs minimal prompt (~200 token system + content.
+- `tests/test_summarizer.py` — 8 tests covering Ollama connectivity, structured output, JSON repair, empty input, batch processing, resume, token budget, and performance.
+
+**Key design decisions:**
+- Calls Ollama directly (not through OpenClaw) to avoid workspace overhead
+- `/no_think` prefix disables Qwen3's extended reasoning for faster responses
+- `format: "json"` constrains Ollama's output to valid JSON
+- JSON repair handles remaining edge cases (fences, trailing commas, single quotes)
+- Batch summarizer keys on `content_hash` for resume — re-running skips completed items
+- Relevance score clamped to [0.0, 1.0]
+
+### Test Results
+
+| Test | Result | Notes |
+|---|---|---|
+| 3.1 — Ollama JSON response | **PASS** | Returns valid JSON with `format: "json"` |
+| 3.2 — Structured summary output | **PASS** | All fields present: title, summary, relevance_tags, relevance_score, key_developments |
+| 3.3 — JSON repair | **PASS** | Handles trailing commas, markdown fences, single quotes |
+| 3.4 — Empty content handling | **PASS** | Returns graceful "no content" result |
+| 3.5 — Batch summarizer | **PASS** | Processes 2-item manifest, writes summaries to dated dir |
+| 3.6 — Resume skips processed | **PASS** | Second run: total_skipped=1, total_processed=0 |
+| 3.7 — Token budget | **PASS** | Prompt with 500-token content is <4000 tokens |
+| 3.8 — Performance <60s | **PASS** | Single summary completes within timeout |
+
+All 8 tests passed in 128.63s (dominated by 5 Ollama inference calls).
+
+### Exit Criteria
+- Single-source summarization completes in < 60 seconds
+- JSON output is valid and structured in > 90% of cases (100% in tests with `format: "json"`)
+- Batch of 2 sources completes without crashing
+- Resume works correctly (skips already-summarized items)
+- All 8 tests pass
+
+### Known Issues / Notes
+- **Inference speed**: ~20-25s per summary on M1 Pro. A full batch of 100+ sources would take ~40 minutes — acceptable for overnight runs.
+- **`format: "json"` reliability**: Ollama's constrained JSON output mode makes JSON repair rarely needed in practice, but the repair utility is there for edge cases.
+- **Batch manifest format**: `run_batch_summarize` expects `{"date":..., "items":[{"url":..., "content_hash":..., "content_path":...}]}`. This differs slightly from the Chunk 2 fetcher manifest (flat list). The Chunk 4+ orchestrator will bridge these formats.
