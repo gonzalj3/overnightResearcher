@@ -127,7 +127,8 @@ output:
 
     with patch("research.orchestrate.run_fetch_pipeline", return_value=str(raw_dir)), \
          patch("research.orchestrate.run_batch_summarize", return_value=mock_summary_result), \
-         patch("research.orchestrate.run_synthesis", return_value=mock_synthesis):
+         patch("research.orchestrate.run_synthesis", return_value=mock_synthesis), \
+         patch("research.orchestrate.send_imessage_notification", return_value=True) as mock_imsg:
         report_path = run_nightly_research(
             sources_override={"max_total": 5},
             db_path=str(tmp_path / "test.db"),
@@ -140,6 +141,12 @@ output:
     with open(report_path) as f:
         content = f.read()
     assert "AI Research Report" in content
+
+    # Verify iMessage notification was called with the report path
+    mock_imsg.assert_called_once()
+    call_args = mock_imsg.call_args
+    assert call_args[0][0] == report_path  # first positional arg is report_path
+    assert isinstance(call_args[0][1], str)  # second arg is executive_summary
 
 
 # TEST 6.4: Orchestrator logs are created
