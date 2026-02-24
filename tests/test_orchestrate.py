@@ -227,35 +227,57 @@ output:
     assert os.path.exists(report_path)
 
 
-# TEST 6.6: launchd plist is valid XML
-def test_launchd_plist_valid(tmp_path):
-    """Generate and validate a launchd plist."""
-    plist_data = {
-        "Label": "com.research.nightly",
-        "ProgramArguments": [
-            "/usr/bin/python3",
-            os.path.join(os.path.dirname(__file__), "..", "research", "orchestrate.py"),
-        ],
-        "StartCalendarInterval": {
-            "Hour": 0,
-            "Minute": 0,
-        },
-        "StandardOutPath": "/tmp/research-nightly.log",
-        "StandardErrorPath": "/tmp/research-nightly.err",
-        "EnvironmentVariables": {
-            "OLLAMA_HOST": "http://127.0.0.1:11434",
-        },
-    }
-    plist_path = tmp_path / "com.research.nightly.plist"
-    with open(plist_path, "wb") as f:
-        plistlib.dump(plist_data, f)
+# TEST 6.6: Installed launchd plist is valid and correctly configured
+def test_launchd_plist_installed():
+    """Validate the actual installed launchd plist for nightly research."""
+    plist_path = os.path.expanduser(
+        "~/Library/LaunchAgents/com.research.nightly.plist"
+    )
+    assert os.path.isfile(plist_path), f"Plist not installed at {plist_path}"
 
-    # Validate it can be re-read
     with open(plist_path, "rb") as f:
         loaded = plistlib.load(f)
+
+    # Correct label
     assert loaded["Label"] == "com.research.nightly"
-    assert "ProgramArguments" in loaded
-    assert "StartCalendarInterval" in loaded
+
+    # Points to run.sh
+    args = loaded["ProgramArguments"]
+    assert args[0] == "/bin/bash"
+    assert args[1].endswith("run.sh")
+    assert os.path.isfile(args[1]), f"run.sh not found at {args[1]}"
+
+    # Scheduled at midnight
+    schedule = loaded["StartCalendarInterval"]
+    assert schedule["Hour"] == 0
+    assert schedule["Minute"] == 0
+
+    # Ollama env vars persisted
+    env = loaded["EnvironmentVariables"]
+    assert env["OLLAMA_CONTEXT_LENGTH"] == "16384"
+    assert env["OLLAMA_FLASH_ATTENTION"] == "1"
+
+    # PATH includes homebrew (needed for openclaw CLI)
+    assert "/opt/homebrew/bin" in env["PATH"]
+
+    # Log paths exist or are creatable
+    for key in ("StandardOutPath", "StandardErrorPath"):
+        log_dir = os.path.dirname(loaded[key])
+        assert os.path.isdir(log_dir), f"Log directory missing: {log_dir}"
+
+
+# TEST 6.6b: launchd plist is loaded in launchctl
+def test_launchd_plist_loaded():
+    """Verify the nightly research plist is registered with launchctl."""
+    import subprocess
+    result = subprocess.run(
+        ["launchctl", "list"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert "com.research.nightly" in result.stdout, (
+        "Plist not loaded — run: launchctl load "
+        "~/Library/LaunchAgents/com.research.nightly.plist"
+    )
 
 
 # TEST 6.7: Manifest conversion for summarizer
