@@ -2,4 +2,8 @@ __pycache__/
 *.pyc
 .venv/
 research/raw/
+research/summaries/
+research/logs/
+research/research.db
+research/interest_overrides.yaml
 .pytest_cache/

@@ -62,5 +62,16 @@ sources:
     max_items: 200
     enabled: true
 
+interests:
+  primary:
+    - AI agents
+    - local LLM inference
+    - fusion energy
+    - brain-computer interfaces
+  secondary:
+    - WebXR
+    - PropTech
+    - Python
+
 output:
   raw_dir: research/raw

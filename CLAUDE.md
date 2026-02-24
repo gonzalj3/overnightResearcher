@@ -494,3 +494,179 @@ All 6 tests passed in ~1s (mocked LLM).
 - **Cluster enrichment**: `cluster_and_rank` attempts to match LLM-returned titles back to full summary objects. If titles don't match exactly, the compact LLM-returned items are used instead.
 - **Report DB integration**: `insert_daily_report` is implemented in `db.py` but not yet called from `run_synthesis`. The orchestrator (future chunk) will wire this up.
 - **Stats placeholders**: `sources_skipped`, `fetch_errors`, and `processing_time` in the report are placeholders — the orchestrator will populate these with real values.
+
+---
+
+## CHUNK 6: Orchestrator & Scheduling
+
+**Date completed:** 2026-02-22
+
+### Purpose
+Wire everything together into a single entry point that can be triggered nightly via launchd or cron.
+
+### What was done
+
+**Files created:**
+- `research/orchestrate.py` — Main orchestrator with 6-step pipeline:
+  1. Initialize DB
+  2. Fetch sources via `run_fetch_pipeline()`
+  3. Summarize via `run_batch_summarize()` (with manifest format bridging)
+  4. Build memory context
+  5. Synthesize report via `run_synthesis()`
+  6. Persist results (insert sources, update interest weights, log daily report)
+- `tests/test_orchestrate.py` — 7 tests (all mocked, no network/Ollama dependency)
+
+**Key functions:**
+- `run_nightly_research()` — Main entry point with overridable paths for all I/O
+- `run_health_check()` — Checks Ollama, RAM, disk, model responsiveness (3 retries with 10s delay)
+- `setup_logging()` — File + stderr logging to `research/logs/{date}.log`
+- `_load_manifest_for_summarizer()` — Bridges fetcher's flat manifest to summarizer's expected format (matches content files by SHA256 hash)
+- `_load_summaries_from_dir()` — Loads all summary JSONs from a directory
+
+**Key design decisions:**
+- All pipeline stages log to `research/logs/{date}.log` with timestamps
+- Pipeline gracefully handles zero summaries (produces empty report)
+- DB persistence: inserts each summary as a source record, updates interest weights from tags, logs daily report
+- Health check: macOS `vm_stat` for RAM, `shutil.disk_usage` for disk, Ollama `/api/tags` + test generation
+- `sources.yaml` extended with `interests.primary` and `interests.secondary` sections
+
+### Test Results
+
+| Test | Result | Notes |
+|---|---|---|
+| 6.1 — Health check passes | **PASS** | Mocked Ollama returns healthy status |
+| 6.2 — Health check Ollama down | **PASS** | ConnectionError handled gracefully |
+| 6.3 — Orchestrator E2E | **PASS** | Mocked pipeline produces report file |
+| 6.4 — Logging | **PASS** | Log file created with timestamped entries |
+| 6.5 — Partial failure | **PASS** | Empty manifest still produces report |
+| 6.6 — launchd plist valid | **PASS** | plistlib round-trip validates XML |
+| 6.7 — Manifest conversion | **PASS** | Fetcher manifest correctly bridged for summarizer |
+
+All 7 tests passed in <1s (all mocked).
+
+### Exit Criteria
+- End-to-end mini run completes successfully (mocked)
+- Health checks work and catch failures
+- Logging captures all stages
+- launchd plist validates
+- All 7 tests pass
+
+---
+
+## CHUNK 7: Interest Profile Evolution & Multi-Day Continuity
+
+**Date completed:** 2026-02-22
+
+### Purpose
+Make the system smarter over time by tracking which topics produce the most relevant results and adjusting future searches accordingly.
+
+### What was done
+
+**Files created:**
+- `research/interest_tracker.py` — Interest evolution engine with 6 functions:
+  - `adjust_weights()` — Counts high-relevance (>0.7) sources per tag, boosts matching interest weights
+  - `suggest_new_interests()` — Finds recurring tags not in current profile (above min_occurrences threshold)
+  - `apply_overrides()` — Applies pinned/blocked/focus overrides from user config
+  - `load_overrides()` — Loads `interest_overrides.yaml` (pinned, blocked, focus lists)
+  - `generate_weekly_digest()` — Produces markdown weekly rollup with stats, top developments, trending topics, weight changes
+  - `generate_drift_report()` — One-line summary of top interest weights for report stats
+- `tests/test_interest_tracker.py` — 4 tests covering all major functions
+
+**Key design decisions:**
+- Interest weights only go up via the DB formula `1.0 + (total_hits * 0.1)` — no active decay (prevents data loss)
+- New interest suggestions require `min_occurrences=3` to avoid noise
+- Overrides file (`interest_overrides.yaml`) is optional — defaults to empty lists if absent
+- Focus interests get a temporary +2.0 weight boost
+- Weekly digest is pure data aggregation — no LLM calls needed
+- Case-insensitive tag matching for suggestions and weight adjustment
+
+### Test Results
+
+| Test | Result | Notes |
+|---|---|---|
+| 7.1 — Weight adjustment | **PASS** | AI agents weight increases after 10 high-relevance hits |
+| 7.2 — New interest suggestions | **PASS** | "quantum computing" suggested from 5 occurrences |
+| 7.3 — Pinned/blocked overrides | **PASS** | Pinned kept ≥ current, blocked removed |
+| 7.4 — Weekly digest | **PASS** | Digest > 100 chars with expected sections |
+
+All 4 tests passed in <1s.
+
+### Exit Criteria
+- Interest weights change after nightly runs
+- New interests are suggested from data
+- Pinned/blocked overrides work
+- Weekly digest produces coherent summary
+- All 4 tests pass
+
+---
+
+## CHUNK 8: iMessage via BlueBubbles Bridge + Security Hardening
+
+**Date completed:** 2026-02-24
+
+### Purpose
+Enable the research agent to send nightly report notifications via iMessage using BlueBubbles server as a bridge, connected through OpenClaw's channel system. Apply security hardening to restrict file access and network exposure.
+
+### What was done
+
+**BlueBubbles setup (manual):**
+- BlueBubbles server installed and configured on Mac
+- Firebase project created (free tier) with Firestore in test mode
+- Service account key and `google-services.json` loaded into BlueBubbles
+- Server running at `http://192.168.1.184:1234` with password auth
+
+**OpenClaw configuration:**
+- Installed `@openclaw/bluebubbles` plugin
+- Connected channel: `openclaw config set channels.bluebubbles '{"serverUrl":"http://192.168.1.184:1234","password":"..."}'`
+- Channel verified connected via `openclaw channels status`
+
+**Security hardening (3 measures):**
+1. `mediaLocalRoots` set to `["/Users/jmg/reports"]` — only report files can be sent as attachments
+2. Gateway bound to loopback (`127.0.0.1:18789`) — no external network access
+3. CVE patch (GHSA-RWJ8-P9VQ-25GV) verified — `assertLocalMediaPathAllowed` present in extension code, OpenClaw v2026.2.21-2 >= v2026.2.14
+
+**Orchestrator wiring:**
+- `research/orchestrate.py` — Added `send_imessage_notification()` function:
+  - Sends concise message with date, executive summary (truncated to 500 chars), and report path
+  - Calls `openclaw message send` via subprocess
+  - Handles BlueBubbles 500 quirk (returns exit code 1 but still delivers)
+  - Handles missing `openclaw` CLI and timeouts gracefully
+  - Wired into pipeline as Step 7 (after DB persistence, before completion log)
+- `tests/test_orchestrate.py` — Added 3 new tests (6.8, 6.9, 6.10)
+
+**Key design decisions:**
+- Uses `subprocess.run` to call `openclaw message send` CLI (simplest integration, no SDK dependency)
+- BlueBubbles 500 errors treated as success (known quirk — message delivers despite error response)
+- Message kept brief for iMessage readability: date + summary + report path (not full report)
+- Executive summary truncated at word boundary to ~500 chars
+- Notification failure is logged but does not fail the pipeline
+
+### Test Results
+
+| Test | Result | Notes |
+|---|---|---|
+| 6.8 — iMessage send success | **PASS** | Mocked subprocess returns 0, args verified |
+| 6.9 — BlueBubbles 500 quirk | **PASS** | Returns True despite exit code 1 with 500 error |
+| 6.10 — Missing openclaw CLI | **PASS** | FileNotFoundError handled, returns False |
+| Live test #1 | **PASS** | "Test from research agent" received in iMessage |
+| Live test #2 | **PASS** | Second test message received despite 500 error |
+
+All 10 orchestrator tests passed in 6.46s.
+
+### Verification Checklist
+
+| Check | Status |
+|---|---|
+| BlueBubbles server running and connected | **Done** |
+| OpenClaw v2026.2.21-2 (>= v2026.2.14, CVE patched) | **Done** |
+| `assertLocalMediaPathAllowed` in extension code | **Done** |
+| `openclaw channels status` shows bluebubbles connected | **Done** |
+| `mediaLocalRoots` set to `["/Users/jmg/reports"]` | **Done** |
+| Gateway bound to 127.0.0.1 (loopback only) | **Done** |
+| Test iMessage send/receive works end-to-end | **Done** |
+| Orchestrator sends notification after report | **Done** |
+
+### Known Issues / Notes
+- **BlueBubbles 500 error**: The AppleScript bridge returns `Can't make any into type constant (-1700)` but messages still deliver. This is a known BlueBubbles quirk with certain macOS/Messages.app configurations.
+- **Firebase test mode**: Firestore rules expire after 30 days. For localhost-only usage this is irrelevant — Firebase is only used for FCM push notifications to remote clients, not for message delivery.
+- **No attachment sending**: Currently sends text-only notifications with the report file path. Sending the `.md` file as an attachment is possible (`--media` flag) but not implemented since `mediaLocalRoots` is configured for it.

@@ -4,6 +4,17 @@ import os
 from datetime import date
 
 
+def _to_str(value):
+    """Coerce a value to string. Handles lists, dicts, and nested structures."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(_to_str(v) for v in value)
+    if isinstance(value, dict):
+        return str(value)
+    return str(value)
+
+
 def format_report(report_data):
     """Produce a markdown report from structured report data."""
     d = report_data.get("date", date.today().isoformat())
@@ -11,25 +22,25 @@ def format_report(report_data):
 
     # Executive Summary
     sections.append("## Executive Summary")
-    sections.append(report_data.get("executive_summary", "No summary available."))
+    sections.append(_to_str(report_data.get("executive_summary", "No summary available.")))
 
     # Watch List
     watch = report_data.get("watch_list", [])
     if watch:
         sections.append("## Watch List")
         for item in watch:
-            sections.append(f"- {item}")
+            sections.append(f"- {_to_str(item)}")
 
     # Detailed Findings
     themes = report_data.get("themes", [])
     if themes:
         sections.append("## Detailed Findings")
         for theme in themes:
-            sections.append(f"### {theme.get('theme', 'Topic')}")
-            sections.append(theme.get("analysis", ""))
+            sections.append(f"### {_to_str(theme.get('theme', 'Topic'))}")
+            sections.append(_to_str(theme.get("analysis", "")))
             for src in theme.get("sources", []):
                 if src:
-                    sections.append(f"- Source: {src}")
+                    sections.append(f"- Source: {_to_str(src)}")
 
     # Statistics
     stats = report_data.get("stats", {})
