@@ -48,6 +48,14 @@ def send_imessage_notification(report_path, executive_summary=""):
     # Build a concise message (iMessage-friendly, not full report)
     lines = [f"Research Report Ready — {date_str}"]
     if executive_summary:
+        # Coerce to string — LLM may return a list of bullet points
+        if isinstance(executive_summary, list):
+            executive_summary = "\n".join(
+                f"- {item}" if isinstance(item, str) else f"- {str(item)}"
+                for item in executive_summary
+            )
+        elif not isinstance(executive_summary, str):
+            executive_summary = str(executive_summary)
         # Truncate to ~500 chars to keep the message brief
         summary = executive_summary[:500]
         if len(executive_summary) > 500:
