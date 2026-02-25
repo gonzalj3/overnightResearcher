@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.research.chat-daemon</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/jmg/GitHub/overnightResearcher/.venv/bin/python</string>
+		<string>-m</string>
+		<string>research.chat_daemon</string>
+		<string>--chat-id</string>
+		<string>4</string>
+		<string>--db-path</string>
+		<string>/Users/jmg/GitHub/overnightResearcher/research/research.db</string>
+		<string>--reports-dir</string>
+		<string>/Users/jmg/reports</string>
+	</array>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/jmg/GitHub/overnightResearcher</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/jmg</string>
+		<key>PYTHONPATH</key>
+		<string>/Users/jmg/GitHub/overnightResearcher</string>
+	</dict>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<key>KeepAlive</key>
+	<true/>
+
+	<key>StandardOutPath</key>
+	<string>/Users/jmg/GitHub/overnightResearcher/research/logs/chat-daemon-stdout.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>/Users/jmg/GitHub/overnightResearcher/research/logs/chat-daemon-stderr.log</string>
+
+	<key>Nice</key>
+	<integer>10</integer>
+
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+</dict>
+</plist>
