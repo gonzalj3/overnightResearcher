@@ -10,8 +10,8 @@
 		<string>/Users/jmg/GitHub/overnightResearcher/.venv/bin/python</string>
 		<string>-m</string>
 		<string>research.chat_daemon</string>
-		<string>--chat-id</string>
-		<string>4</string>
+		<string>--watch-file</string>
+		<string>/Users/jmg/GitHub/overnightResearcher/research/logs/imsg-watch-stdout.log</string>
 		<string>--db-path</string>
 		<string>/Users/jmg/GitHub/overnightResearcher/research/research.db</string>
 		<string>--reports-dir</string>

@@ -159,42 +159,35 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
         return False
 
 
-def run_watcher(chat_id=4, db_path="research/research.db", reports_dir="~/reports",
-                stop_event=None):
-    """Watch for incoming iMessages and respond.
+def tail_watch_file(watch_file, db_path="research/research.db", reports_dir="~/reports",
+                    stop_event=None):
+    """Tail the NDJSON output file from a separate imsg watch launchd agent.
 
-    Spawns `imsg watch --chat-id <chat_id> --json` and processes messages.
-    Restarts with exponential backoff on subprocess exit.
+    The imsg watch process runs as its own launchd agent (with FDA) and writes
+    NDJSON to a log file. This function tails that file and processes messages.
 
     Args:
-        chat_id: iMessage chat ID to watch.
+        watch_file: Path to the NDJSON file written by imsg watch.
         db_path: Path to SQLite database.
         reports_dir: Path to reports directory.
         stop_event: threading.Event for clean shutdown.
     """
-    backoff = 1
-    max_backoff = 60
+    logger.info("Tailing imsg watch output from %s", watch_file)
 
-    while stop_event is None or not stop_event.is_set():
-        logger.info("Starting imsg watch for chat-id %d", chat_id)
-        try:
-            proc = subprocess.Popen(
-                ["imsg", "watch", "--chat-id", str(chat_id), "--json"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-            )
-        except FileNotFoundError:
-            logger.error("imsg CLI not found — cannot start watcher")
+    # Wait for the file to appear
+    while not os.path.exists(watch_file):
+        if stop_event and stop_event.is_set():
             return
-        except Exception as e:
-            logger.error("Failed to start imsg watch: %s", e)
-            return
+        logger.info("Waiting for watch file to appear: %s", watch_file)
+        time.sleep(2)
 
-        try:
-            for line in proc.stdout:
-                if stop_event and stop_event.is_set():
-                    break
+    with open(watch_file, "r") as f:
+        # Seek to end — only process new messages
+        f.seek(0, 2)
+
+        while stop_event is None or not stop_event.is_set():
+            line = f.readline()
+            if line:
                 line = line.strip()
                 if not line:
                     continue
@@ -202,24 +195,8 @@ def run_watcher(chat_id=4, db_path="research/research.db", reports_dir="~/report
                     msg = json.loads(line)
                     handle_message(msg, db_path=db_path, reports_dir=reports_dir)
                 except json.JSONDecodeError:
-                    logger.warning("Invalid JSON from imsg watch: %s", line[:100])
+                    logger.debug("Skipping non-JSON line: %s", line[:100])
                 except Exception as e:
                     logger.error("Error handling message: %s", e)
-
-            # Process exited
-            proc.wait()
-            backoff = 1  # reset on clean exit after processing
-        except Exception as e:
-            logger.error("Watcher error: %s", e)
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-                proc.wait(timeout=5)
-
-        if stop_event and stop_event.is_set():
-            logger.info("Watcher stopped by stop_event")
-            break
-
-        logger.warning("imsg watch exited, restarting in %ds", backoff)
-        time.sleep(backoff)
-        backoff = min(backoff * 2, max_backoff)
+            else:
+                time.sleep(0.5)
