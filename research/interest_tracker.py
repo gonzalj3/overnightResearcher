@@ -48,12 +48,10 @@ def adjust_weights(db_path, decay_factor=0.05):
             hits = tag_hits[interest_lower]
             update_interest_weights(db_path, interest, hits=hits)
         else:
-            # Slight decay for inactive interests (but never below 0.5)
-            current_weight = data["weight"]
-            if current_weight > 0.5:
-                # We don't have a "set weight" function, so just skip decay
-                # The weight formula is 1.0 + (total_hits * 0.1), so it only goes up
-                pass
+            # Decay is now handled at read-time via get_effective_weights().
+            # Stored weights only increase; effective weights decay over time
+            # based on hours since last_seen_at (half-life ~6 days).
+            pass
 
     return {w["interest"]: w["weight"] for w in get_interest_weights(db_path)}
 

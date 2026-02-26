@@ -670,3 +670,96 @@ All 10 orchestrator tests passed in 6.46s.
 - **BlueBubbles 500 error**: The AppleScript bridge returns `Can't make any into type constant (-1700)` but messages still deliver. This is a known BlueBubbles quirk with certain macOS/Messages.app configurations.
 - **Firebase test mode**: Firestore rules expire after 30 days. For localhost-only usage this is irrelevant — Firebase is only used for FCM push notifications to remote clients, not for message delivery.
 - **No attachment sending**: Currently sends text-only notifications with the report file path. Sending the `.md` file as an attachment is possible (`--media` flag) but not implemented since `mediaLocalRoots` is configured for it.
+
+---
+
+## CHUNK 9: Two-Way iMessage Interaction + Dual Model Setup
+
+**Date completed:** 2026-02-25 (partially — reply delivery still unreliable)
+
+### Purpose
+Enable two-way iMessage interaction so the user can reply to nightly reports with follow-up questions. The OpenClaw gateway receives incoming iMessages via BlueBubbles webhook, invokes an agent, and replies.
+
+### What was done
+
+**Dual model architecture:**
+- **Qwen3 8B** — Used by OpenClaw gateway agent for interactive iMessage chat (fast, ~100s per response through OpenClaw)
+- **Qwen3 32B** — Used by overnight research pipeline via direct Ollama API (no OpenClaw overhead)
+- Models configured independently: OpenClaw config sets `agents.defaults.model.primary: "ollama/qwen3:8b"`, research pipeline hardcodes `MODEL = "qwen3:32b"` in Python
+
+**OpenClaw configuration changes:**
+- `channels.bluebubbles.dmPolicy`: Changed from `"pairing"` to `"allowlist"`
+- `channels.bluebubbles.allowFrom`: `["+12104265298"]`
+- `channels.bluebubbles.serverUrl`: Changed from `http://192.168.1.184:1234` to `http://localhost:1234` (more reliable — both run on same Mac)
+- `agents.defaults.model.primary`: Changed from `"ollama/qwen3:32b"` to `"ollama/qwen3:8b"`
+- `agents.defaults.timeoutSeconds`: Increased from 300 to 600
+- `models.providers.ollama.models`: Added `qwen3:8b` alongside `qwen3:32b`, both with `contextWindow: 32768`
+
+**BlueBubbles configuration (manual):**
+- Webhook URL: `http://127.0.0.1:18789/bluebubbles-webhook?password=warmDayInJanuary`
+- Event subscription: "New Messages"
+- Private API: **Disabled** (requires SIP disabled; AppleScript fallback used instead)
+- Webhook requires `?password=` query param even for loopback (CVE-2026-26316 fix in OpenClaw v2026.2.21-2)
+
+**Agent workspace (`~/.openclaw/workspace/AGENTS.md`):**
+- Instructs agent to reply directly (never use `write` tool)
+- Never use `web_search` — all answers from local reports and SQLite DB
+- Read reports from `~/reports/` and query `research/research.db`
+- Keep responses iMessage-friendly (2-3 short paragraphs)
+
+**Files modified in project:**
+- `research/synthesis.py` — Increased `_llm_call` timeout from 180s to 600s, increased `num_ctx` from 8192 to 16384 (clustering 189 summaries needs more context and time)
+- `run.sh` — Updated `OLLAMA_CONTEXT_LENGTH` from 16384 to 32768
+- `com.research.nightly.plist` — Updated `OLLAMA_CONTEXT_LENGTH` from 16384 to 32768
+
+**Files outside project (OpenClaw workspace):**
+- `~/.openclaw/workspace/AGENTS.md` — Rewritten for iMessage chat agent
+- `~/.openclaw/workspace/TOOLS.md` — Stripped to 3 tools (exec, read, message)
+- `~/.openclaw/openclaw.json` — Multiple config changes via `openclaw config set`
+
+### What works
+- Webhook auth: BlueBubbles → OpenClaw gateway via `?password=` param
+- Message reception: OpenClaw receives DMs from allowlisted number
+- Agent invocation: Gateway spawns Qwen3 8B agent on incoming message
+- Agent completion: 8B model responds in ~100s through OpenClaw agent layer
+- One successful reply delivered via iMessage (03:32 UTC, Feb 25)
+
+### Known Issues / Needs Debugging
+- **Reply delivery unreliable**: Agent completes successfully (`isError=false`) but iMessage reply often doesn't arrive. Possible causes:
+  - BlueBubbles REST API hangs on send (AppleScript timeout) but sometimes still delivers
+  - BlueBubbles app goes to sleep/crashes, becoming unreachable
+  - OpenClaw logs "BlueBubbles final reply failed: TypeError: fetch failed" when BlueBubbles is down
+- **BlueBubbles Private API**: Disabled because SIP is enabled. Typing indicators fail (cosmetic only). AppleScript fallback is slow and unreliable for programmatic sends.
+- **BlueBubbles LAN IP instability**: Server was initially at `192.168.1.184:1234` but became unreachable after restart. Fixed by switching to `localhost:1234`.
+- **Ollama model swapping**: When midnight pipeline runs, it needs 32B but 8B may be loaded (from chat). Ollama swaps models but this adds latency. The synthesis step timed out on first nightly run because of this.
+- **Nightly pipeline Feb 25**: Fetch + summarize succeeded (189 items in 90 min). Synthesis failed on first automatic run (Ollama timeout during model swap). Re-run manually succeeded — report saved to `~/reports/2026-02-25.md`.
+
+### Nightly Pipeline Run Results (Feb 25)
+
+| Step | Result | Duration | Notes |
+|---|---|---|---|
+| Pre-flight checks | **PASS** | <1s | Ollama running, 32B available, 109GB free |
+| Fetch sources | **PASS** | ~26s | 189 sources fetched |
+| Summarize | **PASS** | ~90 min | 189 summaries via Qwen3 32B |
+| Build memory context | **PASS** | <1s | From SQLite DB |
+| Synthesize report | **FAIL** (auto), **PASS** (manual re-run) | 8 min | Ollama timeout during model swap; manual re-run produced 5 themes |
+| Save report | **PASS** (manual) | <1s | `~/reports/2026-02-25.md` |
+| iMessage notification | **Uncertain** | - | Sent via CLI, got 500 quirk response |
+
+### Configuration Reference
+
+**OpenClaw (`~/.openclaw/openclaw.json`) key settings:**
+```json
+{
+  "channels.bluebubbles.serverUrl": "http://localhost:1234",
+  "channels.bluebubbles.dmPolicy": "allowlist",
+  "channels.bluebubbles.allowFrom": ["+12104265298"],
+  "agents.defaults.model.primary": "ollama/qwen3:8b",
+  "agents.defaults.timeoutSeconds": 600
+}
+```
+
+**Ollama env vars (must be set at launch):**
+```bash
+OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_FLASH_ATTENTION=1 OLLAMA_NUM_PARALLEL=1
+```

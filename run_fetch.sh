@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Run the nightly research pipeline end-to-end.
+# Run a lightweight fetch cycle (no synthesis/report).
+# Designed to run every 3 hours via launchd.
 #
 # Usage:
-#   ./run.sh              # full run (~400 sources, ~2-3 hours)
-#   ./run.sh --smoke      # quick smoke test (5 sources, ~2-3 min)
-#   ./run.sh --max 20     # custom source limit
+#   ./run_fetch.sh              # full fetch cycle
+#   ./run_fetch.sh --smoke      # quick smoke test (5 sources)
 
 set -euo pipefail
 
@@ -33,12 +33,11 @@ fi
 
 # --- Pre-flight checks ---
 
-echo "=== Pre-flight checks ==="
+echo "=== Fetch cycle pre-flight ==="
 
 # Check venv
 if [ ! -d "$VENV" ]; then
     echo "FAIL: Python venv not found at $VENV"
-    echo "  Run: python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
     exit 1
 fi
 echo "  venv: OK"
@@ -71,34 +70,25 @@ if ! curl -s "$OLLAMA_URL/api/tags" | grep -q "qwen3:32b"; then
 fi
 echo "  Model qwen3:32b: OK"
 
-# Disk space check
-DISK_FREE_GB=$(df -g "$HOME" | tail -1 | awk '{print $4}')
-if [ "$DISK_FREE_GB" -lt 1 ]; then
-    echo "FAIL: Less than 1GB disk space free"
-    exit 1
-fi
-echo "  Disk free: ${DISK_FREE_GB}GB"
-
 echo "=== Pre-flight passed ==="
 echo ""
 
-# --- Run pipeline ---
+# --- Run fetch cycle ---
 
 if [ -n "$MAX_TOTAL" ]; then
-    echo "Running pipeline with max_total=$MAX_TOTAL ..."
+    echo "Running fetch cycle with max_total=$MAX_TOTAL ..."
     PYTHONPATH="$SCRIPT_DIR" "$VENV/bin/python" -c "
-from research.orchestrate import run_nightly_research
-path = run_nightly_research(sources_override={'max_total': $MAX_TOTAL})
+from research.orchestrate import run_fetch_cycle
+result = run_fetch_cycle(sources_override={'max_total': $MAX_TOTAL})
 print()
-print(f'Report saved to: {path}')
+print(f'Fetch cycle complete: {result}')
 "
 else
-    echo "Running full pipeline ..."
-    PYTHONPATH="$SCRIPT_DIR" "$VENV/bin/python" -m research.orchestrate
+    echo "Running full fetch cycle ..."
+    PYTHONPATH="$SCRIPT_DIR" "$VENV/bin/python" -m research.orchestrate --fetch-only
 fi
 
 echo ""
-echo "=== Done ==="
-echo "  Report:  ~/reports/$(date +%Y-%m-%d).md"
-echo "  Log:     $SCRIPT_DIR/research/logs/$(date +%Y-%m-%d).log"
-echo "  DB:      $SCRIPT_DIR/research/research.db"
+echo "=== Fetch cycle done ==="
+echo "  DB:  $SCRIPT_DIR/research/research.db"
+echo "  Log: $SCRIPT_DIR/research/logs/$(date +%Y-%m-%d).log"

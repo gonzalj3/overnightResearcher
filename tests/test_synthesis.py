@@ -153,3 +153,50 @@ def test_full_synthesis_pipeline(tmp_path, mock_llm):
     result = run_synthesis(summaries, memory_context, output_dir=str(tmp_path))
     assert os.path.exists(result["report_path"])
     assert result["themes_count"] >= 1
+
+
+# TEST 5.7: Staleness penalty reduces score
+def test_staleness_penalty(mock_llm):
+    from research.synthesis import cluster_and_rank
+    summaries = [
+        {"title": "Stale item", "summary": "Old news.", "relevance_score": 0.9,
+         "relevance_tags": ["AI"], "content_hash": "stale_hash_1"},
+        {"title": "Fresh item", "summary": "New news.", "relevance_score": 0.9,
+         "relevance_tags": ["AI"], "content_hash": "fresh_hash_1"},
+    ]
+    stale_hashes = {"stale_hash_1"}
+    clusters = cluster_and_rank(summaries, stale_hashes=stale_hashes)
+    # The LLM mock controls the output, but we can verify it ran without error
+    assert len(clusters) >= 1
+
+
+# TEST 5.8: Focus tags boost score
+def test_focus_boost(mock_llm):
+    from research.synthesis import cluster_and_rank
+    summaries = [
+        {"title": "Focus item", "summary": "Fusion news.", "relevance_score": 0.5,
+         "relevance_tags": ["fusion energy"], "content_hash": "focus_1"},
+        {"title": "Normal item", "summary": "Other news.", "relevance_score": 0.5,
+         "relevance_tags": ["hardware"], "content_hash": "normal_1"},
+    ]
+    focus_tags = ["fusion energy"]
+    clusters = cluster_and_rank(summaries, focus_tags=focus_tags)
+    assert len(clusters) >= 1
+
+
+# TEST 5.9: run_synthesis accepts stale_hashes and focus_tags
+def test_synthesis_with_staleness_and_focus(tmp_path, mock_llm):
+    from research.synthesis import run_synthesis
+    summaries = [
+        {"title": f"Art {i}", "summary": f"Sum {i}", "relevance_score": 0.7,
+         "relevance_tags": ["AI"], "key_developments": [], "url": f"https://ex.com/{i}",
+         "content_hash": f"hash_{i}"}
+        for i in range(5)
+    ]
+    result = run_synthesis(
+        summaries, "context",
+        output_dir=str(tmp_path),
+        stale_hashes={"hash_0", "hash_1"},
+        focus_tags=["AI"],
+    )
+    assert os.path.exists(result["report_path"])

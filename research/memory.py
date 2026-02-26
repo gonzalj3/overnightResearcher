@@ -2,7 +2,7 @@
 
 import json
 
-from research.db import get_top_developments, get_interest_weights, get_trending_topics
+from research.db import get_top_developments, get_effective_weights, get_trending_topics
 
 
 def build_memory_context(db_path, days=7, max_items=10):
@@ -12,6 +12,15 @@ def build_memory_context(db_path, days=7, max_items=10):
     Targets < 1000 tokens (~4000 chars).
     """
     sections = []
+
+    # User profile (from user_memory)
+    try:
+        from research.user_memory import build_user_profile
+        profile = build_user_profile(db_path)
+        if profile:
+            sections.append(profile)
+    except Exception:
+        pass  # user_memory not available yet or no facts
 
     # Top developments from last week
     top = get_top_developments(db_path, days=days, limit=max_items)
@@ -23,12 +32,12 @@ def build_memory_context(db_path, days=7, max_items=10):
             lines.append(f"- {title} (score: {score:.1f})")
         sections.append("\n".join(lines))
 
-    # Interest weights
-    weights = get_interest_weights(db_path)
+    # Interest weights (with time decay applied)
+    weights = get_effective_weights(db_path)
     if weights:
-        lines = ["Interest weights:"]
+        lines = ["Interest weights (with decay):"]
         for w in weights[:10]:
-            lines.append(f"- {w['interest']}: {w['weight']:.1f} ({w['total_hits']} hits)")
+            lines.append(f"- {w['interest']}: {w['weight']:.2f} ({w['total_hits']} hits)")
         sections.append("\n".join(lines))
 
     # Trending topics

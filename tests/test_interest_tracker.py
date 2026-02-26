@@ -120,3 +120,36 @@ def test_weekly_digest(test_db):
     assert "weekly" in digest.lower() or "Week" in digest
     assert len(digest) > 100
     assert "Total sources processed" in digest
+
+
+# TEST 7.5: Effective weights show decay for old interests
+def test_effective_weight_decay(test_db):
+    from research.db import update_interest_weights, get_effective_weights
+    import sqlite3
+
+    update_interest_weights(test_db, "stale interest", hits=10)
+    # Set last_seen_at to 14 days ago
+    old_time = (datetime.now() - timedelta(days=14)).isoformat()
+    conn = sqlite3.connect(test_db)
+    conn.execute("UPDATE interest_feedback SET last_seen_at = ? WHERE interest = ?",
+                 (old_time, "stale interest"))
+    conn.commit()
+    conn.close()
+
+    weights = get_effective_weights(test_db)
+    stale_w = next(w for w in weights if w["interest"] == "stale interest")
+    # After 14 days (~336 hours), decay should be significant
+    # 2.0 * 0.995^336 ≈ 0.37
+    assert stale_w["weight"] < 1.0
+    assert stale_w["stored_weight"] == 2.0
+
+
+# TEST 7.6: Effective weights preserve fresh interests
+def test_effective_weight_fresh(test_db):
+    from research.db import update_interest_weights, get_effective_weights
+
+    update_interest_weights(test_db, "fresh interest", hits=10)
+    weights = get_effective_weights(test_db)
+    fresh_w = next(w for w in weights if w["interest"] == "fresh interest")
+    # Just updated, decay should be negligible
+    assert fresh_w["weight"] > 1.9  # stored = 2.0, near-zero decay

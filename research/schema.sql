@@ -31,6 +31,28 @@ CREATE TABLE IF NOT EXISTS interest_feedback (
     total_hits INTEGER DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS user_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_text TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    received_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    extracted_facts TEXT,  -- JSON array of extracted facts
+    processed BOOLEAN DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS user_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_type TEXT NOT NULL,  -- 'interest', 'project', 'preference', 'context', 'dislike'
+    fact_text TEXT NOT NULL,
+    confidence REAL DEFAULT 0.8,
+    source_message_id INTEGER REFERENCES user_messages(id),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    status TEXT DEFAULT 'active'  -- 'active', 'archived', 'deleted'
+);
+
 CREATE INDEX IF NOT EXISTS idx_sources_date ON sources(fetched_at);
 CREATE INDEX IF NOT EXISTS idx_sources_score ON sources(relevance_score);
 CREATE INDEX IF NOT EXISTS idx_sources_hash ON sources(content_hash);
+CREATE INDEX IF NOT EXISTS idx_user_memory_status ON user_memory(status);
+CREATE INDEX IF NOT EXISTS idx_user_memory_type ON user_memory(fact_type);

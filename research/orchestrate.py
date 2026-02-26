@@ -15,9 +15,11 @@ import requests
 import yaml
 
 from research.db import (
+    get_stale_hashes,
     init_db,
     insert_daily_report,
     insert_source,
+    mark_sources_reported,
     update_interest_weights,
 )
 from research.fetcher import run_fetch_pipeline
@@ -31,6 +33,7 @@ logger = logging.getLogger("research.orchestrate")
 OLLAMA_URL = "http://localhost:11434"
 IMESSAGE_TARGET = "+12104265298"
 IMESSAGE_CHANNEL = "bluebubbles"
+IMESSAGE_BACKEND = "imsg"  # "imsg" or "bluebubbles"
 
 
 def send_imessage_notification(report_path, executive_summary=""):
@@ -101,6 +104,75 @@ def send_imessage_notification(report_path, executive_summary=""):
     except Exception as e:
         logger.error("iMessage send error: %s", e)
         return False
+
+
+def _build_notification_message(report_path, executive_summary=""):
+    """Build a concise iMessage notification string."""
+    date_str = date.today().isoformat()
+    lines = [f"Research Report Ready — {date_str}"]
+    if executive_summary:
+        if isinstance(executive_summary, list):
+            executive_summary = "\n".join(
+                f"- {item}" if isinstance(item, str) else f"- {str(item)}"
+                for item in executive_summary
+            )
+        elif not isinstance(executive_summary, str):
+            executive_summary = str(executive_summary)
+        summary = executive_summary[:500]
+        if len(executive_summary) > 500:
+            summary = summary.rsplit(" ", 1)[0] + "..."
+        lines.append("")
+        lines.append(summary)
+    lines.append("")
+    lines.append(f"Full report: {report_path}")
+    return "\n".join(lines)
+
+
+def send_imessage_via_imsg(report_path, executive_summary=""):
+    """Send a brief iMessage with the report summary via the imsg CLI.
+
+    Args:
+        report_path: Path to the saved report file.
+        executive_summary: Short summary text to include in the message.
+
+    Returns:
+        True if the message was sent successfully, False otherwise.
+    """
+    message = _build_notification_message(report_path, executive_summary)
+
+    try:
+        result = subprocess.run(
+            ["imsg", "send", "--to", IMESSAGE_TARGET, "--text", message],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info("iMessage notification sent via imsg")
+            return True
+        else:
+            logger.error("imsg send failed (exit %d): %s", result.returncode, result.stderr)
+            return False
+    except FileNotFoundError:
+        logger.error("imsg CLI not found — install with: brew install steipete/tap/imsg")
+        return False
+    except subprocess.TimeoutExpired:
+        logger.error("imsg send timed out after 30s")
+        return False
+    except Exception as e:
+        logger.error("imsg send error: %s", e)
+        return False
+
+
+def send_notification(report_path, executive_summary=""):
+    """Send iMessage notification using the configured backend.
+
+    Routes to imsg or BlueBubbles based on IMESSAGE_BACKEND constant.
+    """
+    if IMESSAGE_BACKEND == "imsg":
+        return send_imessage_via_imsg(report_path, executive_summary)
+    else:
+        return send_imessage_notification(report_path, executive_summary)
 
 
 def setup_logging(log_dir=None):
@@ -274,6 +346,136 @@ def _load_summaries_from_dir(summaries_dir):
     return summaries
 
 
+def _fetch_summarize_persist(sources_path, db_path, sources_override=None):
+    """Shared logic: fetch sources, summarize, persist to DB.
+
+    Used by both run_nightly_research() (full pipeline) and run_fetch_cycle() (lightweight).
+
+    Returns dict with summaries list, summary_results, and interests.
+    """
+    sources_override = sources_override or {}
+    max_total = sources_override.get("max_total")
+
+    # Load config for interests
+    with open(sources_path) as f:
+        config = yaml.safe_load(f)
+    interests_config = config.get("interests", {})
+    interests = interests_config.get("primary", []) + interests_config.get("secondary", [])
+    if not interests:
+        interests = ["AI agents", "local LLM inference"]
+
+    # Fetch
+    logger.info("Fetching sources (max_total=%s)", max_total)
+    raw_dir = run_fetch_pipeline(
+        sources_path=sources_path,
+        max_total=max_total,
+    )
+    manifest_path = os.path.join(raw_dir, "manifest.json")
+    if os.path.isfile(manifest_path):
+        with open(manifest_path) as f:
+            raw_manifest = json.load(f)
+        total_fetched = len(raw_manifest)
+    else:
+        total_fetched = 0
+    logger.info("Fetched %d sources to %s", total_fetched, raw_dir)
+
+    # Summarize
+    logger.info("Summarizing sources")
+    manifest = _load_manifest_for_summarizer(raw_dir)
+    summary_results = run_batch_summarize(
+        manifest, interests=interests
+    )
+    logger.info(
+        "Summarized: %d succeeded, %d failed, %d skipped",
+        summary_results["total_succeeded"],
+        summary_results["total_failed"],
+        summary_results["total_skipped"],
+    )
+
+    # Load summaries
+    summaries = _load_summaries_from_dir(summary_results["summaries_dir"])
+
+    # Persist to DB
+    logger.info("Persisting results to database")
+    for summary in summaries:
+        insert_source(db_path, {
+            "url": summary.get("source_url", summary.get("url", "")),
+            "content_hash": summary.get("content_hash", ""),
+            "source_type": summary.get("source_type", "unknown"),
+            "fetched_at": summary.get("summarized_at", datetime.now(timezone.utc).isoformat()),
+            "title": summary.get("title", ""),
+            "summary": summary.get("summary", ""),
+            "relevance_score": summary.get("relevance_score", 0.0),
+            "relevance_tags": json.dumps(summary.get("relevance_tags", [])) if isinstance(summary.get("relevance_tags"), list) else summary.get("relevance_tags", "[]"),
+            "key_developments": json.dumps(summary.get("key_developments", [])) if isinstance(summary.get("key_developments"), list) else summary.get("key_developments", "[]"),
+            "raw_content_path": summary.get("content_path", ""),
+        })
+
+    # Update interest weights from tags
+    tag_counts = {}
+    for summary in summaries:
+        if summary.get("relevance_score", 0) >= 0.5:
+            tags = summary.get("relevance_tags", [])
+            if isinstance(tags, str):
+                try:
+                    tags = json.loads(tags)
+                except (json.JSONDecodeError, TypeError):
+                    tags = []
+            for tag in tags:
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+    for tag, count in tag_counts.items():
+        update_interest_weights(db_path, tag, hits=count)
+
+    return {
+        "summaries": summaries,
+        "summary_results": summary_results,
+        "interests": interests,
+    }
+
+
+def run_fetch_cycle(
+    sources_override=None,
+    db_path=None,
+    log_dir=None,
+    sources_path=None,
+):
+    """Run a lightweight fetch cycle (no synthesis, no report, no notification).
+
+    Designed to run every 3 hours to accumulate fresh sources in the DB.
+    Dedup via content_hash ensures overlap with nightly runs is harmless.
+
+    Returns dict with fetch/summarize stats.
+    """
+    start_time = time.time()
+
+    log_dir = setup_logging(log_dir)
+    logger.info("=== Fetch Cycle Starting ===")
+
+    if db_path is None:
+        db_path = os.path.join(os.path.dirname(__file__), "research.db")
+    if sources_path is None:
+        sources_path = os.path.join(os.path.dirname(__file__), "sources.yaml")
+
+    try:
+        init_db(db_path)
+        result = _fetch_summarize_persist(sources_path, db_path, sources_override)
+
+        elapsed = time.time() - start_time
+        logger.info(
+            "=== Fetch cycle complete in %.1f minutes. %d summaries persisted ===",
+            elapsed / 60,
+            len(result["summaries"]),
+        )
+        return result["summary_results"]
+
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error("=== Fetch cycle FAILED after %.1f minutes ===", elapsed / 60)
+        logger.error("Error: %s", e)
+        logger.error(traceback.format_exc())
+        raise
+
+
 def run_nightly_research(
     sources_override=None,
     db_path=None,
@@ -305,50 +507,16 @@ def run_nightly_research(
     if sources_path is None:
         sources_path = os.path.join(os.path.dirname(__file__), "sources.yaml")
 
-    sources_override = sources_override or {}
-    max_total = sources_override.get("max_total")
-
     try:
         # Step 1: Initialize DB
         logger.info("Step 1: Initializing database at %s", db_path)
         init_db(db_path)
 
-        # Load config for interests
-        with open(sources_path) as f:
-            config = yaml.safe_load(f)
-        interests_config = config.get("interests", {})
-        interests = interests_config.get("primary", []) + interests_config.get("secondary", [])
-        if not interests:
-            interests = ["AI agents", "local LLM inference"]
-
-        # Step 2: Fetch
-        logger.info("Step 2: Fetching sources (max_total=%s)", max_total)
-        raw_dir = run_fetch_pipeline(
-            sources_path=sources_path,
-            max_total=max_total,
-        )
-        # Count fetched items
-        manifest_path = os.path.join(raw_dir, "manifest.json")
-        if os.path.isfile(manifest_path):
-            with open(manifest_path) as f:
-                raw_manifest = json.load(f)
-            total_fetched = len(raw_manifest)
-        else:
-            total_fetched = 0
-        logger.info("Fetched %d sources to %s", total_fetched, raw_dir)
-
-        # Step 3: Summarize
-        logger.info("Step 3: Summarizing sources")
-        manifest = _load_manifest_for_summarizer(raw_dir)
-        summary_results = run_batch_summarize(
-            manifest, interests=interests
-        )
-        logger.info(
-            "Summarized: %d succeeded, %d failed, %d skipped",
-            summary_results["total_succeeded"],
-            summary_results["total_failed"],
-            summary_results["total_skipped"],
-        )
+        # Steps 2-3: Fetch, summarize, persist (shared with fetch cycle)
+        logger.info("Steps 2-3: Fetch, summarize, persist")
+        fsp_result = _fetch_summarize_persist(sources_path, db_path, sources_override)
+        summaries = fsp_result["summaries"]
+        interests = fsp_result["interests"]
 
         # Step 4: Build memory context
         logger.info("Step 4: Building memory context")
@@ -356,7 +524,6 @@ def run_nightly_research(
 
         # Step 5: Synthesize report
         logger.info("Step 5: Synthesizing report")
-        summaries = _load_summaries_from_dir(summary_results["summaries_dir"])
         if not summaries:
             logger.warning("No summaries to synthesize — producing empty report")
             summaries = [{
@@ -367,43 +534,34 @@ def run_nightly_research(
                 "key_developments": [],
             }]
 
-        synthesis_result = run_synthesis(summaries, memory, output_dir=output_dir)
+        # Get stale hashes and focus tags for scoring adjustments
+        stale_hashes = get_stale_hashes(db_path)
+        logger.info("Found %d stale hashes (reported 3+ days ago)", len(stale_hashes))
+
+        focus_tags = []
+        try:
+            from research.user_memory import build_focus_boost_tags
+            focus_tags = build_focus_boost_tags(db_path)
+            if focus_tags:
+                logger.info("Focus boost tags: %s", focus_tags)
+        except Exception:
+            pass  # user_memory not available
+
+        synthesis_result = run_synthesis(
+            summaries, memory, output_dir=output_dir,
+            stale_hashes=stale_hashes, focus_tags=focus_tags,
+        )
         report_path = synthesis_result["report_path"]
         logger.info("Report saved to %s", report_path)
 
-        # Step 6: Persist to DB
-        logger.info("Step 6: Persisting results to database")
-        # Insert each summary as a source record
-        for summary in summaries:
-            insert_source(db_path, {
-                "url": summary.get("source_url", summary.get("url", "")),
-                "content_hash": summary.get("content_hash", ""),
-                "source_type": summary.get("source_type", "unknown"),
-                "fetched_at": summary.get("summarized_at", datetime.now(timezone.utc).isoformat()),
-                "title": summary.get("title", ""),
-                "summary": summary.get("summary", ""),
-                "relevance_score": summary.get("relevance_score", 0.0),
-                "relevance_tags": json.dumps(summary.get("relevance_tags", [])) if isinstance(summary.get("relevance_tags"), list) else summary.get("relevance_tags", "[]"),
-                "key_developments": json.dumps(summary.get("key_developments", [])) if isinstance(summary.get("key_developments"), list) else summary.get("key_developments", "[]"),
-                "raw_content_path": summary.get("content_path", ""),
-            })
+        # Step 6: Mark reported and log daily report
+        logger.info("Step 6: Finalizing report records")
+        reported_hashes = [
+            s.get("content_hash", "") for s in summaries if s.get("content_hash")
+        ]
+        mark_sources_reported(db_path, reported_hashes)
+        logger.info("Marked %d sources as reported", len(reported_hashes))
 
-        # Update interest weights from tags
-        tag_counts = {}
-        for summary in summaries:
-            if summary.get("relevance_score", 0) >= 0.5:
-                tags = summary.get("relevance_tags", [])
-                if isinstance(tags, str):
-                    try:
-                        tags = json.loads(tags)
-                    except (json.JSONDecodeError, TypeError):
-                        tags = []
-                for tag in tags:
-                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
-        for tag, count in tag_counts.items():
-            update_interest_weights(db_path, tag, hits=count)
-
-        # Insert daily report record
         insert_daily_report(db_path, {
             "report_date": date.today().isoformat(),
             "report_path": report_path,
@@ -421,7 +579,7 @@ def run_nightly_research(
         # Step 7: Send iMessage notification
         logger.info("Step 7: Sending iMessage notification")
         executive_summary = synthesis_result.get("executive_summary", "")
-        send_imessage_notification(report_path, executive_summary)
+        send_notification(report_path, executive_summary)
 
         elapsed = time.time() - start_time
         logger.info(
@@ -442,6 +600,21 @@ def run_nightly_research(
 
 
 if __name__ == "__main__":
-    # Entry point for cron / launchd
-    report = run_nightly_research()
-    print(f"Report: {report}")
+    import argparse
+    parser = argparse.ArgumentParser(description="Research pipeline")
+    parser.add_argument("--fetch-only", action="store_true",
+                        help="Run fetch cycle only (no synthesis/report)")
+    parser.add_argument("--max-total", type=int, default=None,
+                        help="Max sources to fetch")
+    args = parser.parse_args()
+
+    override = {}
+    if args.max_total:
+        override["max_total"] = args.max_total
+
+    if args.fetch_only:
+        result = run_fetch_cycle(sources_override=override)
+        print(f"Fetch cycle: {result}")
+    else:
+        report = run_nightly_research(sources_override=override)
+        print(f"Report: {report}")

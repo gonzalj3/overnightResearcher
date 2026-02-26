@@ -70,11 +70,21 @@ def generate_reply(question, db_path="research/research.db", reports_dir="~/repo
     except Exception as e:
         logger.warning("Could not load memory context: %s", e)
 
+    # Build user profile for personalized replies
+    user_profile = ""
+    try:
+        from research.user_memory import build_user_profile
+        user_profile = build_user_profile(db_path)
+    except Exception as e:
+        logger.debug("Could not load user profile: %s", e)
+
     # Truncate report to leave room for prompt + response
     report_excerpt = report_text[:4000] if report_text else "No report available today."
 
     prompt = f"""/no_think
 You are a helpful AI research assistant. Answer the user's question based on the research report and memory context below. Keep your answer concise (2-3 short paragraphs) and iMessage-friendly.
+
+{user_profile}
 
 === Today's Research Report ===
 {report_excerpt}
@@ -139,6 +149,7 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
     reply = generate_reply(text, db_path=db_path, reports_dir=reports_dir)
     logger.info("Generated reply (%d chars)", len(reply))
 
+    sent = False
     try:
         result = subprocess.run(
             ["imsg", "send", "--to", sender, "--text", reply],
@@ -148,19 +159,24 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
         )
         if result.returncode == 0:
             logger.info("Reply sent to %s", sender)
-            return True
+            sent = True
         else:
             logger.error("imsg send failed (exit %d): %s", result.returncode, result.stderr)
-            return False
     except FileNotFoundError:
         logger.error("imsg CLI not found")
-        return False
     except subprocess.TimeoutExpired:
         logger.error("imsg send timed out")
-        return False
     except Exception as e:
         logger.error("Error sending reply: %s", e)
-        return False
+
+    # Process message for memory extraction (after reply, so user gets response fast)
+    try:
+        from research.user_memory import process_message
+        process_message(db_path, text, sender)
+    except Exception as e:
+        logger.warning("Memory extraction failed (non-fatal): %s", e)
+
+    return sent
 
 
 def tail_watch_file(watch_file, db_path="research/research.db", reports_dir="~/reports",

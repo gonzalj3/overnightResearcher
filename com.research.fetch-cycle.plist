@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.research.fetch-cycle</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/jmg/GitHub/overnightResearcher/run_fetch.sh</string>
+	</array>
+
+	<key>StartInterval</key>
+	<integer>10800</integer>
+
+	<key>WorkingDirectory</key>
+	<string>/Users/jmg/GitHub/overnightResearcher</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOME</key>
+		<string>/Users/jmg</string>
+		<key>OLLAMA_CONTEXT_LENGTH</key>
+		<string>32768</string>
+		<key>OLLAMA_FLASH_ATTENTION</key>
+		<string>1</string>
+	</dict>
+
+	<key>StandardOutPath</key>
+	<string>/Users/jmg/GitHub/overnightResearcher/research/logs/fetch-cycle-stdout.log</string>
+
+	<key>StandardErrorPath</key>
+	<string>/Users/jmg/GitHub/overnightResearcher/research/logs/fetch-cycle-stderr.log</string>
+
+	<key>Nice</key>
+	<integer>10</integer>
+</dict>
+</plist>

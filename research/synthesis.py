@@ -16,14 +16,14 @@ MODEL = "qwen3:32b"
 
 
 def _llm_call(prompt, system="You are a research analyst. Output valid JSON only.",
-               use_json=True, timeout=180):
+               use_json=True, timeout=600):
     """Make a single Ollama call."""
     payload = {
         "model": MODEL,
         "prompt": prompt,
         "system": system,
         "stream": False,
-        "options": {"temperature": 0.2, "num_ctx": 8192},
+        "options": {"temperature": 0.2, "num_ctx": 16384},
     }
     if use_json:
         payload["format"] = "json"
@@ -37,18 +37,46 @@ def _llm_call(prompt, system="You are a research analyst. Output valid JSON only
     return raw
 
 
-def cluster_and_rank(summaries, top_n=10):
+def cluster_and_rank(summaries, top_n=10, stale_hashes=None, focus_tags=None):
     """Pass 1: Cluster summaries by theme and rank top items.
+
+    Args:
+        summaries: list of summary dicts
+        top_n: max items to select
+        stale_hashes: set of content_hashes reported 3+ days ago (score * 0.3 penalty)
+        focus_tags: list of tags to boost (score * 1.5 for matching items)
 
     Returns list of clusters: [{"theme": str, "items": [summary_dicts]}]
     """
+    stale_hashes = stale_hashes or set()
+    focus_tags_lower = {t.lower() for t in (focus_tags or [])}
+
+    # Apply staleness penalty and focus boost to scores before ranking
+    scored = []
+    for s in summaries:
+        score = s.get("relevance_score", 0)
+        content_hash = s.get("content_hash", "")
+        if content_hash in stale_hashes:
+            score *= 0.3
+        if focus_tags_lower:
+            item_tags = s.get("relevance_tags", [])
+            if isinstance(item_tags, str):
+                try:
+                    item_tags = json.loads(item_tags)
+                except (json.JSONDecodeError, TypeError):
+                    item_tags = []
+            if any(t.lower() in focus_tags_lower for t in item_tags):
+                score *= 1.5
+        scored.append((score, s))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
     # Build compact input
     compact = []
-    for s in sorted(summaries, key=lambda x: x.get("relevance_score", 0), reverse=True):
+    for score, s in scored:
         compact.append({
             "title": s.get("title", "Untitled")[:80],
             "summary": s.get("summary", "")[:100],
-            "score": s.get("relevance_score", 0),
+            "score": round(score, 3),
             "tags": s.get("relevance_tags", [])[:3],
         })
     compact = compact[:top_n * 2]  # send more than top_n for grouping
@@ -149,7 +177,8 @@ Respond with JSON: {{"executive_summary": "bullet points here", "watch_list": ["
     }
 
 
-def run_synthesis(summaries, memory_context="", output_dir=None):
+def run_synthesis(summaries, memory_context="", output_dir=None,
+                  stale_hashes=None, focus_tags=None):
     """Full 3-pass synthesis pipeline.
 
     Returns dict with report_path, themes_count, executive_summary.
@@ -161,7 +190,7 @@ def run_synthesis(summaries, memory_context="", output_dir=None):
 
     # Pass 1: Cluster & rank
     logger.info("Pass 1: Clustering %d summaries", len(summaries))
-    clusters = cluster_and_rank(summaries)
+    clusters = cluster_and_rank(summaries, stale_hashes=stale_hashes, focus_tags=focus_tags)
 
     # Pass 2: Synthesize each theme (max 5)
     logger.info("Pass 2: Synthesizing %d themes", len(clusters))

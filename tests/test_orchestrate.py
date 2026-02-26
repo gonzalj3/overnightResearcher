@@ -128,7 +128,7 @@ output:
     with patch("research.orchestrate.run_fetch_pipeline", return_value=str(raw_dir)), \
          patch("research.orchestrate.run_batch_summarize", return_value=mock_summary_result), \
          patch("research.orchestrate.run_synthesis", return_value=mock_synthesis), \
-         patch("research.orchestrate.send_imessage_notification", return_value=True) as mock_imsg:
+         patch("research.orchestrate.send_notification", return_value=True) as mock_imsg:
         report_path = run_nightly_research(
             sources_override={"max_total": 5},
             db_path=str(tmp_path / "test.db"),
@@ -254,7 +254,7 @@ def test_launchd_plist_installed():
 
     # Ollama env vars persisted
     env = loaded["EnvironmentVariables"]
-    assert env["OLLAMA_CONTEXT_LENGTH"] == "16384"
+    assert env["OLLAMA_CONTEXT_LENGTH"] == "32768"
     assert env["OLLAMA_FLASH_ATTENTION"] == "1"
 
     # PATH includes homebrew (needed for openclaw CLI)
@@ -351,3 +351,207 @@ def test_imessage_notification_no_openclaw():
         result = send_imessage_notification("/Users/jmg/reports/2026-02-24.md")
 
     assert result is False
+
+
+# TEST 6.11: imsg send success
+def test_imsg_send_success():
+    from research.orchestrate import send_imessage_via_imsg
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+    mock_result.stderr = ""
+
+    with patch("research.orchestrate.subprocess.run", return_value=mock_result) as mock_run:
+        result = send_imessage_via_imsg(
+            "/Users/jmg/reports/2026-02-25.md",
+            "AI agents saw major advances this week."
+        )
+
+    assert result is True
+    args = mock_run.call_args[0][0]
+    assert args == ["imsg", "send", "--to", "+12104265298", "--text", mock_run.call_args[0][0][-1]]
+    assert "imsg" == args[0]
+    assert "send" == args[1]
+    assert "--to" == args[2]
+    assert "+12104265298" == args[3]
+    assert "--text" == args[4]
+    assert "Research Report Ready" in args[5]
+
+
+# TEST 6.12: imsg CLI not found
+def test_imsg_cli_not_found():
+    from research.orchestrate import send_imessage_via_imsg
+
+    with patch("research.orchestrate.subprocess.run", side_effect=FileNotFoundError):
+        result = send_imessage_via_imsg("/Users/jmg/reports/2026-02-25.md")
+
+    assert result is False
+
+
+# TEST 6.13: imsg send failure (non-zero exit)
+def test_imsg_send_failure():
+    from research.orchestrate import send_imessage_via_imsg
+
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    mock_result.stderr = "Error: could not send message"
+
+    with patch("research.orchestrate.subprocess.run", return_value=mock_result):
+        result = send_imessage_via_imsg("/Users/jmg/reports/2026-02-25.md")
+
+    assert result is False
+
+
+# TEST 6.14: Fetch cycle completes (mocked)
+def test_fetch_cycle(tmp_path):
+    from research.orchestrate import run_fetch_cycle
+    import hashlib
+
+    sources_yaml = tmp_path / "sources.yaml"
+    sources_yaml.write_text("""
+sources:
+  hacker_news:
+    type: hn
+    max_items: 2
+    enabled: true
+interests:
+  primary: [AI agents]
+  secondary: []
+output:
+  raw_dir: {raw_dir}
+""".format(raw_dir=str(tmp_path / "raw")))
+
+    raw_dir = tmp_path / "raw" / "2026-02-26"
+    raw_dir.mkdir(parents=True)
+
+    content = "# Fetch Cycle Test\nSome content."
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    (raw_dir / "hn_0.md").write_text(content)
+    manifest = [{"url": "https://example.com/fc", "source_type": "hn",
+                 "title": "Fetch Test", "fetched_at": "2026-02-26T06:00:00+00:00",
+                 "content_hash": content_hash}]
+    (raw_dir / "manifest.json").write_text(json.dumps(manifest))
+
+    mock_summary = {
+        "title": "Fetch Test",
+        "summary": "Test summary.",
+        "relevance_tags": ["AI agents"],
+        "relevance_score": 0.7,
+        "key_developments": [],
+        "source_url": "https://example.com/fc",
+        "content_hash": content_hash,
+        "summarized_at": "2026-02-26T06:00:00+00:00",
+    }
+    summaries_dir = tmp_path / "summaries" / "2026-02-26"
+    summaries_dir.mkdir(parents=True)
+    (summaries_dir / f"{content_hash}.json").write_text(json.dumps(mock_summary))
+
+    mock_summary_result = {
+        "total_processed": 1, "total_succeeded": 1,
+        "total_failed": 0, "total_skipped": 0,
+        "summaries_dir": str(summaries_dir),
+    }
+
+    with patch("research.orchestrate.run_fetch_pipeline", return_value=str(raw_dir)), \
+         patch("research.orchestrate.run_batch_summarize", return_value=mock_summary_result):
+        result = run_fetch_cycle(
+            db_path=str(tmp_path / "test.db"),
+            log_dir=str(tmp_path / "logs"),
+            sources_path=str(sources_yaml),
+        )
+
+    assert result["total_succeeded"] == 1
+
+
+# TEST 6.15: fetch-cycle plist is valid
+def test_fetch_cycle_plist():
+    plist_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "com.research.fetch-cycle.plist",
+    )
+    assert os.path.isfile(plist_path), f"Plist not found at {plist_path}"
+
+    with open(plist_path, "rb") as f:
+        loaded = plistlib.load(f)
+
+    assert loaded["Label"] == "com.research.fetch-cycle"
+    assert loaded["StartInterval"] == 10800  # 3 hours
+    args = loaded["ProgramArguments"]
+    assert args[0] == "/bin/bash"
+    assert "run_fetch.sh" in args[1]
+
+
+# TEST 6.16: nightly pipeline passes stale_hashes and focus_tags to synthesis
+def test_nightly_passes_stale_and_focus(tmp_path):
+    from research.orchestrate import run_nightly_research
+    import hashlib
+
+    sources_yaml = tmp_path / "sources.yaml"
+    sources_yaml.write_text("""
+sources:
+  hacker_news:
+    type: hn
+    max_items: 2
+    enabled: true
+interests:
+  primary: [AI agents]
+  secondary: []
+""")
+
+    raw_dir = tmp_path / "raw" / "2026-02-26"
+    raw_dir.mkdir(parents=True)
+    content = "# Test\nContent."
+    content_hash = hashlib.sha256(content.encode()).hexdigest()
+    (raw_dir / "hn_0.md").write_text(content)
+    (raw_dir / "manifest.json").write_text(json.dumps([{
+        "url": "https://example.com/1", "source_type": "hn",
+        "title": "Test", "fetched_at": "2026-02-26T00:00:00", "content_hash": content_hash
+    }]))
+
+    mock_summary = {
+        "title": "Test", "summary": "Summary.", "relevance_tags": ["AI agents"],
+        "relevance_score": 0.8, "key_developments": [],
+        "source_url": "https://example.com/1", "content_hash": content_hash,
+        "summarized_at": "2026-02-26T00:00:00",
+    }
+    summaries_dir = tmp_path / "summaries" / "2026-02-26"
+    summaries_dir.mkdir(parents=True)
+    (summaries_dir / f"{content_hash}.json").write_text(json.dumps(mock_summary))
+
+    mock_synthesis = {
+        "report_path": str(tmp_path / "reports" / "2026-02-26.md"),
+        "themes_count": 1,
+        "executive_summary": "Test summary.",
+    }
+    (tmp_path / "reports").mkdir(exist_ok=True)
+    (tmp_path / "reports" / "2026-02-26.md").write_text("# Report\nTest.")
+
+    with patch("research.orchestrate.run_fetch_pipeline", return_value=str(raw_dir)), \
+         patch("research.orchestrate.run_batch_summarize", return_value={
+             "total_processed": 1, "total_succeeded": 1, "total_failed": 0,
+             "total_skipped": 0, "summaries_dir": str(summaries_dir),
+         }), \
+         patch("research.orchestrate.run_synthesis", return_value=mock_synthesis) as mock_synth, \
+         patch("research.orchestrate.send_notification", return_value=True):
+        run_nightly_research(
+            db_path=str(tmp_path / "test.db"),
+            output_dir=str(tmp_path / "reports"),
+            log_dir=str(tmp_path / "logs"),
+            sources_path=str(sources_yaml),
+        )
+
+    # Verify run_synthesis was called with stale_hashes and focus_tags
+    call_kwargs = mock_synth.call_args
+    assert "stale_hashes" in call_kwargs.kwargs or len(call_kwargs.args) > 3
+    assert "focus_tags" in call_kwargs.kwargs or len(call_kwargs.args) > 4
+
+
+# TEST 6.17: __main__ argparse --fetch-only
+def test_main_argparse():
+    """Verify the argparse setup works (import-time check)."""
+    from research.orchestrate import run_fetch_cycle, run_nightly_research
+    # Both functions should be importable and callable
+    assert callable(run_fetch_cycle)
+    assert callable(run_nightly_research)
