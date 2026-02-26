@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from datetime import date, datetime, timedelta
@@ -88,6 +89,203 @@ def _get_recent_fetches(db_path, hours=6, limit=15):
     except Exception as e:
         logger.debug("Could not load recent fetches: %s", e)
         return ""
+
+
+_URL_RE = re.compile(r'https?://[^\s<>"\']+')
+_FETCH_INTENT_RE = re.compile(
+    r'\b(?:pull|fetch|grab|go\s+to|check|what\'?s\s+on|look\s+at|read|open|visit|scrape|get)\b',
+    re.IGNORECASE,
+)
+_DOMAIN_RE = re.compile(r'\b([a-zA-Z0-9][-a-zA-Z0-9]*\.(?:com|org|net|io|dev|ai|co|me|info|site|blog|news|xyz))\b')
+_HN_RE = re.compile(r'\b(?:hacker\s*news|HN)\b', re.IGNORECASE)
+
+
+def detect_fetch_request(text):
+    """Detect if the user wants us to fetch a URL or website.
+
+    Returns dict with:
+      - should_fetch: bool
+      - url: explicit URL if found
+      - site: domain/site name if found (no full URL)
+      - source: "hn" for Hacker News requests
+      - topic: optional topic filter (for HN)
+      - query: the original user text
+    """
+    result = {"should_fetch": False, "query": text}
+
+    # Check for explicit URL
+    url_match = _URL_RE.search(text)
+    if url_match:
+        result["should_fetch"] = True
+        result["url"] = url_match.group(0).rstrip(".,;:!?)")
+        return result
+
+    # Check for Hacker News
+    hn_match = _HN_RE.search(text)
+    if hn_match:
+        result["should_fetch"] = True
+        result["source"] = "hn"
+        # Extract topic: everything after HN mention, minus filler words
+        after = text[hn_match.end():].strip()
+        topic = re.sub(r'^(?:about|for|on|regarding)\s+', '', after, flags=re.IGNORECASE).strip()
+        topic = re.sub(r'[?.!]+$', '', topic).strip()
+        result["topic"] = topic if topic else None
+        return result
+
+    # Check for fetch intent + domain name
+    if _FETCH_INTENT_RE.search(text):
+        domain_match = _DOMAIN_RE.search(text)
+        if domain_match:
+            result["should_fetch"] = True
+            result["site"] = domain_match.group(1)
+            return result
+
+    return result
+
+
+def handle_fetch_request(fetch_info, db_path="research/research.db"):
+    """Handle a detected fetch request by fetching content and summarizing.
+
+    Args:
+        fetch_info: dict from detect_fetch_request()
+        db_path: path to SQLite database
+
+    Returns:
+        Reply string for the user.
+    """
+    source = fetch_info.get("source")
+    url = fetch_info.get("url")
+    site = fetch_info.get("site")
+    query = fetch_info.get("query", "")
+    topic = fetch_info.get("topic")
+
+    if source == "hn":
+        return _handle_hn_request(topic, query)
+    elif url:
+        return _handle_url_request(url, query)
+    elif site:
+        return _handle_url_request(f"https://{site}", query)
+    else:
+        return "I couldn't figure out what to fetch. Try sending a URL or site name."
+
+
+def _handle_hn_request(topic, query):
+    """Fetch and format Hacker News stories, optionally filtered by topic."""
+    from research.fetch_hn import fetch_hn_stories
+
+    stories = fetch_hn_stories(30)
+    if not stories:
+        return "Couldn't reach Hacker News right now. Try again in a bit."
+
+    if topic:
+        # Use 8B model to filter stories by topic
+        stories_text = "\n".join(
+            f"- {s['title']} (score: {s['score']})" for s in stories
+        )
+        prompt = f"""/no_think
+From these Hacker News stories, pick the ones related to "{topic}". Return ONLY a JSON array of the matching story titles, e.g. ["title1", "title2"]. If none match, return [].
+
+{stories_text}"""
+        try:
+            resp = requests.post(
+                OLLAMA_URL,
+                json={
+                    "model": MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": 0.1, "num_ctx": 4096},
+                },
+                timeout=60,
+            )
+            resp.raise_for_status()
+            raw = resp.json().get("response", "[]")
+            # Parse the JSON array of titles
+            try:
+                matched_titles = json.loads(raw)
+                if isinstance(matched_titles, dict):
+                    # LLM might wrap in {"titles": [...]}
+                    matched_titles = list(matched_titles.values())[0] if matched_titles else []
+                if isinstance(matched_titles, list) and matched_titles:
+                    title_set = {t.lower() for t in matched_titles if isinstance(t, str)}
+                    filtered = [s for s in stories if s["title"].lower() in title_set]
+                    if filtered:
+                        stories = filtered
+                    # If no exact match, fall back to all stories
+            except (json.JSONDecodeError, TypeError):
+                pass  # Fall through to top-by-score
+        except Exception as e:
+            logger.warning("LLM filtering failed, showing top stories: %s", e)
+
+    # Sort by score, take top 5
+    stories.sort(key=lambda s: s.get("score", 0), reverse=True)
+    top = stories[:5]
+    header = f"Top HN stories about \"{topic}\"" if topic else "Top Hacker News stories right now"
+    return _format_hn_stories(top, header)
+
+
+def _format_hn_stories(stories, header):
+    """Format HN stories as a numbered list for iMessage."""
+    lines = [header, ""]
+    for i, s in enumerate(stories, 1):
+        title = s.get("title", "Untitled")
+        score = s.get("score", 0)
+        url = s.get("url", "")
+        hn_link = s.get("comments_url", "")
+        line = f"{i}. {title} ({score} pts)"
+        if url:
+            line += f"\n   {url}"
+        if hn_link:
+            line += f"\n   Discussion: {hn_link}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _handle_url_request(url, query):
+    """Fetch a URL and summarize the content."""
+    from research.fetch_http import fetch_url
+
+    content = fetch_url(url)
+    if not content:
+        return f"Couldn't fetch {url} — the site may be down or blocking requests."
+
+    return _summarize_fetched_content(content, query, url)
+
+
+def _summarize_fetched_content(content, query, url=""):
+    """Send fetched content to 8B model for extraction/summarization."""
+    # Truncate to fit in context
+    truncated = content[:4000]
+    if len(content) > 4000:
+        truncated += "\n...(truncated)"
+
+    prompt = f"""/no_think
+You fetched this web page{' from ' + url if url else ''}. The user asked: "{query}"
+
+Extract the most relevant information and summarize it concisely for iMessage (2-3 short paragraphs). Include any key links, names, or numbers.
+
+=== Page Content ===
+{truncated}"""
+
+    try:
+        resp = requests.post(
+            OLLAMA_URL,
+            json={
+                "model": MODEL,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.3, "num_ctx": 8192},
+            },
+            timeout=120,
+        )
+        resp.raise_for_status()
+        reply = resp.json().get("response", "").strip()
+        return _truncate_reply(reply)
+    except Exception as e:
+        logger.error("Failed to summarize fetched content: %s", e)
+        # Return raw content excerpt as fallback
+        fallback = content[:500]
+        return f"Here's what I found at {url}:\n\n{fallback}..."
 
 
 def generate_reply(question, db_path="research/research.db", reports_dir="~/reports"):
@@ -186,7 +384,12 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
     sender = message_dict.get("sender", IMESSAGE_TARGET)
     logger.info("Incoming message from %s: %s", sender, text[:80])
 
-    reply = generate_reply(text, db_path=db_path, reports_dir=reports_dir)
+    # Check if this is a fetch request (URL, site name, or HN)
+    fetch_req = detect_fetch_request(text)
+    if fetch_req["should_fetch"]:
+        reply = handle_fetch_request(fetch_req, db_path=db_path)
+    else:
+        reply = generate_reply(text, db_path=db_path, reports_dir=reports_dir)
     logger.info("Generated reply (%d chars)", len(reply))
 
     sent = False

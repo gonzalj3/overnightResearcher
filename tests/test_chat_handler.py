@@ -141,3 +141,168 @@ def test_reply_truncation():
     # Short text unchanged
     short = "Hello world"
     assert _truncate_reply(short) == "Hello world"
+
+
+# --- Fetch detection tests ---
+
+def test_detect_fetch_explicit_url():
+    from research.chat_handler import detect_fetch_request
+
+    result = detect_fetch_request("grab https://simonwillison.net/2026/Feb/25/some-post")
+    assert result["should_fetch"] is True
+    assert result["url"] == "https://simonwillison.net/2026/Feb/25/some-post"
+    assert "site" not in result
+    assert "source" not in result
+
+
+def test_detect_fetch_site_name():
+    from research.chat_handler import detect_fetch_request
+
+    result = detect_fetch_request("pull the latest from simonwillison.net")
+    assert result["should_fetch"] is True
+    assert result["site"] == "simonwillison.net"
+    assert "url" not in result
+
+
+def test_detect_fetch_hn():
+    from research.chat_handler import detect_fetch_request
+
+    result = detect_fetch_request("what's on hacker news?")
+    assert result["should_fetch"] is True
+    assert result["source"] == "hn"
+    assert result["topic"] is None
+
+    # With topic
+    result2 = detect_fetch_request("what's on HN about OpenAI?")
+    assert result2["should_fetch"] is True
+    assert result2["source"] == "hn"
+    assert result2["topic"] == "OpenAI"
+
+
+def test_detect_fetch_no_match():
+    from research.chat_handler import detect_fetch_request
+
+    result = detect_fetch_request("tell me about AI agents")
+    assert result["should_fetch"] is False
+    assert "url" not in result
+    assert "site" not in result
+    assert "source" not in result
+
+
+def test_handle_fetch_url(test_db):
+    from research.chat_handler import handle_fetch_request
+
+    mock_ollama_resp = MagicMock()
+    mock_ollama_resp.status_code = 200
+    mock_ollama_resp.json.return_value = {
+        "response": "Simon wrote about new SQLite features and datasette updates."
+    }
+
+    with patch("research.fetch_http.requests.get") as mock_get, \
+         patch("research.chat_handler.requests.post", return_value=mock_ollama_resp):
+        # Mock the HTTP fetch
+        mock_http_resp = MagicMock()
+        mock_http_resp.status_code = 200
+        mock_http_resp.text = "<html><body><h1>Simon's Blog</h1><p>New SQLite features</p></body></html>"
+        mock_http_resp.raise_for_status = MagicMock()
+        mock_get.return_value = mock_http_resp
+
+        fetch_info = {
+            "should_fetch": True,
+            "url": "https://simonwillison.net",
+            "query": "what's the latest on simonwillison.net",
+        }
+        reply = handle_fetch_request(fetch_info, db_path=test_db)
+
+    assert "SQLite" in reply or "sqlite" in reply.lower() or "datasette" in reply.lower()
+
+
+def test_handle_fetch_hn_no_topic(test_db):
+    from research.chat_handler import handle_fetch_request
+
+    fake_stories = [
+        {"title": "Show HN: My Project", "url": "https://example.com/1", "score": 200,
+         "comments_url": "https://news.ycombinator.com/item?id=1"},
+        {"title": "GPT-5 Released", "url": "https://example.com/2", "score": 500,
+         "comments_url": "https://news.ycombinator.com/item?id=2"},
+        {"title": "Rust 2.0", "url": "https://example.com/3", "score": 300,
+         "comments_url": "https://news.ycombinator.com/item?id=3"},
+    ]
+
+    with patch("research.fetch_hn.requests.get") as mock_get:
+        # Mock topstories
+        mock_top = MagicMock()
+        mock_top.json.return_value = [1, 2, 3]
+        mock_top.raise_for_status = MagicMock()
+
+        # Mock individual items
+        def side_effect(url, timeout=10):
+            for i, story in enumerate(fake_stories, 1):
+                if str(i) in url and "item" in url:
+                    m = MagicMock()
+                    m.json.return_value = {
+                        "title": story["title"], "url": story["url"],
+                        "score": story["score"], "id": i,
+                    }
+                    m.raise_for_status = MagicMock()
+                    return m
+            return mock_top
+
+        mock_get.side_effect = side_effect
+
+        fetch_info = {"should_fetch": True, "source": "hn", "topic": None, "query": "what's on HN?"}
+        reply = handle_fetch_request(fetch_info, db_path=test_db)
+
+    assert "GPT-5 Released" in reply  # highest score should be first
+    assert "500 pts" in reply
+    # No LLM call for no-topic case
+    assert "Top Hacker News stories" in reply
+
+
+def test_handle_fetch_hn_with_topic(test_db):
+    from research.chat_handler import handle_fetch_request
+
+    fake_stories = [
+        {"title": "OpenAI releases GPT-5", "url": "https://example.com/1", "score": 400,
+         "comments_url": "https://news.ycombinator.com/item?id=1"},
+        {"title": "Rust 2.0 announced", "url": "https://example.com/2", "score": 300,
+         "comments_url": "https://news.ycombinator.com/item?id=2"},
+        {"title": "OpenAI safety report", "url": "https://example.com/3", "score": 200,
+         "comments_url": "https://news.ycombinator.com/item?id=3"},
+    ]
+
+    with patch("research.fetch_hn.requests.get") as mock_hn_get:
+        # Mock HN API
+        mock_top = MagicMock()
+        mock_top.json.return_value = [1, 2, 3]
+        mock_top.raise_for_status = MagicMock()
+
+        def hn_side_effect(url, timeout=10):
+            for i, story in enumerate(fake_stories, 1):
+                if str(i) in url and "item" in url:
+                    m = MagicMock()
+                    m.json.return_value = {
+                        "title": story["title"], "url": story["url"],
+                        "score": story["score"], "id": i,
+                    }
+                    m.raise_for_status = MagicMock()
+                    return m
+            return mock_top
+
+        mock_hn_get.side_effect = hn_side_effect
+
+        # Mock LLM filtering
+        mock_ollama_resp = MagicMock()
+        mock_ollama_resp.status_code = 200
+        mock_ollama_resp.json.return_value = {
+            "response": '["OpenAI releases GPT-5", "OpenAI safety report"]'
+        }
+
+        with patch("research.chat_handler.requests.post", return_value=mock_ollama_resp):
+            fetch_info = {"should_fetch": True, "source": "hn", "topic": "OpenAI",
+                          "query": "HN posts about OpenAI"}
+            reply = handle_fetch_request(fetch_info, db_path=test_db)
+
+    assert "OpenAI" in reply
+    assert "Rust" not in reply  # Should be filtered out
+    assert 'about "OpenAI"' in reply
