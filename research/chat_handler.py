@@ -5,10 +5,11 @@ import logging
 import os
 import subprocess
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import requests
 
+from research.db import get_recent_sources
 from research.memory import build_memory_context
 
 logger = logging.getLogger(__name__)
@@ -56,10 +57,43 @@ def _get_latest_report(reports_dir):
     return ""
 
 
+def _get_recent_fetches(db_path, hours=6, limit=15):
+    """Pull the most recent high-relevance sources from the DB.
+
+    Returns a formatted string of recent fetches, or empty string if none.
+    """
+    try:
+        # get_recent_sources uses days, so we fetch 1 day and filter by hours
+        recent = get_recent_sources(db_path, days=1)
+        cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+        fresh = [
+            s for s in recent
+            if s.get("fetched_at", "") >= cutoff
+        ]
+        # Sort by relevance score descending
+        fresh.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+        fresh = fresh[:limit]
+
+        if not fresh:
+            return ""
+
+        lines = []
+        for s in fresh:
+            title = s.get("title", "Untitled")[:80]
+            summary = s.get("summary", "")[:150]
+            score = s.get("relevance_score", 0)
+            lines.append(f"- [{score:.1f}] {title}: {summary}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Could not load recent fetches: %s", e)
+        return ""
+
+
 def generate_reply(question, db_path="research/research.db", reports_dir="~/reports"):
     """Generate a reply to a user question using Ollama 8B.
 
-    Reads today's report and DB memory context, then asks the LLM.
+    Reads today's report, recent DB fetches, and memory context, then asks the LLM.
 
     Returns reply string.
     """
@@ -78,13 +112,19 @@ def generate_reply(question, db_path="research/research.db", reports_dir="~/repo
     except Exception as e:
         logger.debug("Could not load user profile: %s", e)
 
+    # Pull recent fetches from DB (includes 3-hour cycle results)
+    recent_fetches = _get_recent_fetches(db_path)
+
     # Truncate report to leave room for prompt + response
-    report_excerpt = report_text[:4000] if report_text else "No report available today."
+    report_excerpt = report_text[:3000] if report_text else "No report available today."
 
     prompt = f"""/no_think
-You are a helpful AI research assistant. Answer the user's question based on the research report and memory context below. Keep your answer concise (2-3 short paragraphs) and iMessage-friendly.
+You are a helpful AI research assistant. Answer the user's question based on the research data below. Keep your answer concise (2-3 short paragraphs) and iMessage-friendly.
 
 {user_profile}
+
+=== Latest Fetches (last 6 hours) ===
+{recent_fetches if recent_fetches else "No recent fetches."}
 
 === Today's Research Report ===
 {report_excerpt}
