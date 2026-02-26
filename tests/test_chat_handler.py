@@ -60,14 +60,15 @@ def test_generate_reply_prompt(test_db, reports_dir):
     assert call_kwargs["model"] == "qwen3:8b"
 
 
-# TEST: handle_message skips own messages
+# TEST: handle_message skips own messages (is_from_me=true)
 def test_handle_message_skips_own(test_db, reports_dir):
     from research.chat_handler import handle_message
 
     with patch("research.chat_handler.requests.post") as mock_ollama, \
          patch("research.chat_handler.subprocess.run") as mock_send:
         result = handle_message(
-            {"text": "hello", "is_from_me": True, "sender": "+12104265298"},
+            {"text": "hello", "is_from_me": True, "sender": "+12104265298",
+             "chat_id": 4},
             db_path=test_db,
             reports_dir=reports_dir,
         )
@@ -93,7 +94,7 @@ def test_handle_message_incoming(test_db, reports_dir):
     with patch("research.chat_handler.requests.post", return_value=mock_ollama_resp), \
          patch("research.chat_handler.subprocess.run", return_value=mock_send_result) as mock_send:
         result = handle_message(
-            {"text": "Tell me about AI agents", "is_from_me": False, "sender": "+12104265298"},
+            {"text": "Tell me about AI agents", "is_from_me": False, "sender": "+12104265298", "chat_id": 4},
             db_path=test_db,
             reports_dir=reports_dir,
         )
@@ -118,7 +119,7 @@ def test_handle_message_ollama_down(test_db, reports_dir):
     with patch("research.chat_handler.requests.post", side_effect=req.ConnectionError), \
          patch("research.chat_handler.subprocess.run", return_value=mock_send_result) as mock_send:
         result = handle_message(
-            {"text": "What's new?", "is_from_me": False, "sender": "+12104265298"},
+            {"text": "What's new?", "is_from_me": False, "sender": "+12104265298", "chat_id": 4},
             db_path=test_db,
             reports_dir=reports_dir,
         )

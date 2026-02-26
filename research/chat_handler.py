@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3:8b"
 IMESSAGE_TARGET = "+12104265298"
+PHONE_CHAT_ID = 4   # chat with phone number identifier — agent sends replies here
+EMAIL_CHAT_ID = 5    # chat with email identifier — user sends questions from phone here
 MAX_REPLY_CHARS = 1500
 
 
@@ -120,8 +122,10 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
     Returns:
         True if reply was sent, False otherwise.
     """
+    # Skip messages sent from this Mac (agent replies).
+    # Messages from the phone arrive with is_from_me=false.
     if message_dict.get("is_from_me", False):
-        logger.debug("Skipping own message")
+        logger.debug("Skipping own message (is_from_me=true)")
         return False
 
     text = message_dict.get("text", "").strip()
