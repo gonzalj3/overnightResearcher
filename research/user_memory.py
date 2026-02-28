@@ -7,8 +7,6 @@ a persistent user profile that improves research relevance over time.
 import json
 import logging
 
-import requests
-
 from research.db import (
     get_active_facts,
     find_similar_facts,
@@ -17,11 +15,11 @@ from research.db import (
     mark_message_processed,
     update_fact,
 )
+from research.gpu_timesheet import ollama_generate
 from research.json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3:8b"  # Use 8B for fast fact extraction (already loaded for chat)
 
 
@@ -61,16 +59,15 @@ Return JSON: {{"operations": [{{"operation": "ADD|UPDATE|DELETE|NOOP", "fact_typ
 If NOOP, return: {{"operations": [{{"operation": "NOOP"}}]}}"""
 
     try:
-        resp = requests.post(OLLAMA_URL, json={
-            "model": MODEL,
-            "prompt": prompt,
-            "system": "You extract user preferences from messages. Output valid JSON only.",
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0.1, "num_ctx": 4096},
-        }, timeout=60)
-        resp.raise_for_status()
-        raw = resp.json().get("response", "")
+        raw = ollama_generate(
+            model=MODEL,
+            prompt=prompt,
+            caller="user_memory",
+            system="You extract user preferences from messages. Output valid JSON only.",
+            use_json=True,
+            timeout=60,
+            options={"temperature": 0.1, "num_ctx": 4096},
+        )
         result = repair_json(raw)
 
         if result.get("parse_failed"):

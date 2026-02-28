@@ -11,11 +11,11 @@ from datetime import date, datetime, timedelta
 import requests
 
 from research.db import get_recent_sources
+from research.gpu_timesheet import ollama_generate
 from research.memory import build_memory_context
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3:8b"
 IMESSAGE_TARGET = "+12104265298"
 PHONE_CHAT_ID = 4   # chat with phone number identifier — agent sends replies here
@@ -187,19 +187,14 @@ From these Hacker News stories, pick the ones related to "{topic}". Return ONLY 
 
 {stories_text}"""
         try:
-            resp = requests.post(
-                OLLAMA_URL,
-                json={
-                    "model": MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "format": "json",
-                    "options": {"temperature": 0.1, "num_ctx": 4096},
-                },
+            raw = ollama_generate(
+                model=MODEL,
+                prompt=prompt,
+                caller="chat_handler.hn_filter",
+                use_json=True,
                 timeout=60,
-            )
-            resp.raise_for_status()
-            raw = resp.json().get("response", "[]")
+                options={"temperature": 0.1, "num_ctx": 4096},
+            ) or "[]"
             # Parse the JSON array of titles
             try:
                 matched_titles = json.loads(raw)
@@ -268,18 +263,13 @@ Extract the most relevant information and summarize it concisely for iMessage (2
 {truncated}"""
 
     try:
-        resp = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.3, "num_ctx": 8192},
-            },
+        reply = ollama_generate(
+            model=MODEL,
+            prompt=prompt,
+            caller="chat_handler.fetch_summarize",
             timeout=120,
-        )
-        resp.raise_for_status()
-        reply = resp.json().get("response", "").strip()
+            options={"temperature": 0.3, "num_ctx": 8192},
+        ).strip()
         return _truncate_reply(reply)
     except Exception as e:
         logger.error("Failed to summarize fetched content: %s", e)
@@ -334,18 +324,13 @@ You are a helpful AI research assistant. Answer the user's question based on the
 {question}"""
 
     try:
-        resp = requests.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "prompt": prompt,
-                "stream": False,
-                "options": {"temperature": 0.3, "num_ctx": 8192},
-            },
+        reply = ollama_generate(
+            model=MODEL,
+            prompt=prompt,
+            caller="chat_handler.reply",
             timeout=120,
-        )
-        resp.raise_for_status()
-        reply = resp.json().get("response", "").strip()
+            options={"temperature": 0.3, "num_ctx": 8192},
+        ).strip()
         return _truncate_reply(reply)
     except requests.ConnectionError:
         logger.error("Ollama is not running — cannot generate reply")
@@ -371,7 +356,7 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
         True if reply was sent, False otherwise.
     """
     # Skip messages sent from this Mac (agent replies).
-    # Messages from the phone arrive with is_from_me=false.
+    # Messages from the phone arrive with is_from_me=false on chat_id 4.
     if message_dict.get("is_from_me", False):
         logger.debug("Skipping own message (is_from_me=true)")
         return False

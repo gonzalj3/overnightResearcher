@@ -5,32 +5,26 @@ import logging
 import os
 from datetime import date
 
-import requests
-
+from research.gpu_timesheet import ollama_generate
 from research.json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3:32b"
 
 
 def _llm_call(prompt, system="You are a research analyst. Output valid JSON only.",
-               use_json=True, timeout=600):
+               use_json=True, timeout=600, caller="synthesis"):
     """Make a single Ollama call."""
-    payload = {
-        "model": MODEL,
-        "prompt": prompt,
-        "system": system,
-        "stream": False,
-        "options": {"temperature": 0.2, "num_ctx": 16384},
-    }
-    if use_json:
-        payload["format"] = "json"
-
-    resp = requests.post(OLLAMA_URL, json=payload, timeout=timeout)
-    resp.raise_for_status()
-    raw = resp.json().get("response", "")
+    raw = ollama_generate(
+        model=MODEL,
+        prompt=prompt,
+        caller=caller,
+        system=system,
+        use_json=use_json,
+        timeout=timeout,
+        options={"temperature": 0.2, "num_ctx": 16384},
+    )
 
     if use_json:
         return repair_json(raw)
@@ -88,7 +82,7 @@ Return JSON: {{"clusters": [{{"theme": "Theme Name", "items": [{{"title": "...",
 Items:
 {json.dumps(compact, indent=1)}"""
 
-    result = _llm_call(prompt)
+    result = _llm_call(prompt, caller="synthesis.cluster")
 
     if result.get("parse_failed"):
         # Fallback: single cluster with top items
@@ -137,7 +131,7 @@ Sources:
 
 Respond with JSON: {{"analysis": "Your analysis paragraph here."}}"""
 
-    result = _llm_call(prompt)
+    result = _llm_call(prompt, caller="synthesis.theme")
     if isinstance(result, dict):
         return result.get("analysis", result.get("summary", str(result)))
     return str(result)
@@ -164,7 +158,7 @@ Based on these research theme analyses, produce:
 
 Respond with JSON: {{"executive_summary": "bullet points here", "watch_list": ["item1", "item2"]}}"""
 
-    result = _llm_call(prompt)
+    result = _llm_call(prompt, caller="synthesis.executive")
     if result.get("parse_failed"):
         return {
             "executive_summary": "Report synthesis failed — see detailed findings below.",

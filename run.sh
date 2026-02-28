@@ -46,7 +46,7 @@ echo "  venv: OK"
 # Check Ollama is running, start if not
 if ! curl -s --max-time 5 "$OLLAMA_URL/api/tags" > /dev/null 2>&1; then
     echo "  Ollama not running — starting..."
-    OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_FLASH_ATTENTION=1 ollama serve &
+    OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KEEP_ALIVE=5m ollama serve &
     OLLAMA_PID=$!
     echo "  Waiting for Ollama (pid $OLLAMA_PID)..."
     for i in $(seq 1 30); do

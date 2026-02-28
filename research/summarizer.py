@@ -6,13 +6,11 @@ import os
 import time
 from datetime import date, datetime, timezone
 
-import requests
-
+from research.gpu_timesheet import ollama_generate
 from research.json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
 MODEL = "qwen3:32b"
 DEFAULT_INTERESTS = ["AI agents", "local LLM inference"]
 
@@ -52,17 +50,15 @@ def summarize_source(content, interests, source_url="", timeout=120):
     prompt = build_prompt(content, interests)
 
     try:
-        resp = requests.post(OLLAMA_URL, json={
-            "model": MODEL,
-            "prompt": prompt,
-            "system": SYSTEM_PROMPT,
-            "stream": False,
-            "format": "json",
-            "options": {"temperature": 0.1, "num_ctx": 8192},
-        }, timeout=timeout)
-        resp.raise_for_status()
-        data = resp.json()
-        raw_response = data.get("response", "")
+        raw_response = ollama_generate(
+            model=MODEL,
+            prompt=prompt,
+            caller="summarizer",
+            system=SYSTEM_PROMPT,
+            use_json=True,
+            timeout=timeout,
+            options={"temperature": 0.1, "num_ctx": 8192},
+        )
     except Exception as e:
         logger.error("Ollama request failed for %s: %s", source_url, e)
         return {

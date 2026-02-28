@@ -38,7 +38,7 @@ MOCK_EXEC_SUMMARY_RESPONSE = {
 }
 
 
-def _mock_llm_call(prompt, system=None, use_json=True, timeout=180):
+def _mock_llm_call(prompt, system=None, use_json=True, timeout=180, caller=None):
     """Route mock responses based on prompt content."""
     if "Group these research items" in prompt:
         return MOCK_CLUSTER_RESPONSE
