@@ -13,6 +13,7 @@ import requests
 from research.db import get_recent_sources
 from research.gpu_timesheet import ollama_generate
 from research.memory import build_memory_context
+from research.tools import run_tool_loop, TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,41 @@ Extract the most relevant information and summarize it concisely for iMessage (2
         return f"Here's what I found at {url}:\n\n{fallback}..."
 
 
+def generate_reply_with_tools(question, db_path="research/research.db",
+                              reports_dir="~/reports"):
+    """Generate a reply using LLM tool calling.
+
+    The model decides autonomously which tools to call (fetch URLs, query DB, etc.)
+    based on the user's question. Falls back to None if tool calling fails.
+
+    Returns reply string, or None on failure.
+    """
+    system = (
+        "/no_think\n"
+        "You are a helpful AI research assistant. You have tools to fetch web pages, "
+        "check Hacker News, read GitHub READMEs, and search a local research database. "
+        "Use tools when the user asks for live data. For general questions, answer directly. "
+        "Keep replies concise (2-3 short paragraphs), suitable for iMessage."
+    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": question},
+    ]
+    try:
+        reply = run_tool_loop(
+            model=MODEL,
+            messages=messages,
+            caller="chat_handler.tools",
+            db_path=db_path,
+        )
+        if reply:
+            return _truncate_reply(reply)
+        return None
+    except Exception as e:
+        logger.warning("Tool-calling path failed: %s", e)
+        return None
+
+
 def generate_reply(question, db_path="research/research.db", reports_dir="~/reports"):
     """Generate a reply to a user question using Ollama 8B.
 
@@ -369,12 +405,17 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
     sender = message_dict.get("sender", IMESSAGE_TARGET)
     logger.info("Incoming message from %s: %s", sender, text[:80])
 
-    # Check if this is a fetch request (URL, site name, or HN)
-    fetch_req = detect_fetch_request(text)
-    if fetch_req["should_fetch"]:
-        reply = handle_fetch_request(fetch_req, db_path=db_path)
-    else:
-        reply = generate_reply(text, db_path=db_path, reports_dir=reports_dir)
+    # Try tool-calling path first — model decides what to do
+    reply = generate_reply_with_tools(text, db_path=db_path, reports_dir=reports_dir)
+
+    # Fallback to manual routing if tool calling failed
+    if not reply:
+        logger.info("Tool-calling returned nothing, falling back to manual routing")
+        fetch_req = detect_fetch_request(text)
+        if fetch_req["should_fetch"]:
+            reply = handle_fetch_request(fetch_req, db_path=db_path)
+        else:
+            reply = generate_reply(text, db_path=db_path, reports_dir=reports_dir)
     logger.info("Generated reply (%d chars)", len(reply))
 
     sent = False

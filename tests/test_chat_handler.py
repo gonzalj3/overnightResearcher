@@ -306,3 +306,70 @@ def test_handle_fetch_hn_with_topic(test_db):
     assert "OpenAI" in reply
     assert "Rust" not in reply  # Should be filtered out
     assert 'about "OpenAI"' in reply
+
+
+# --- Tool-calling path tests ---
+
+# TEST: generate_reply_with_tools returns reply when model answers directly
+def test_generate_reply_with_tools_direct(test_db, reports_dir):
+    from research.chat_handler import generate_reply_with_tools
+
+    mock_response = {
+        "role": "assistant",
+        "content": "AI agents are autonomous programs that can take actions.",
+        "tool_calls": None,
+    }
+
+    with patch("research.tools.ollama_chat", return_value=mock_response):
+        reply = generate_reply_with_tools(
+            "what are AI agents?",
+            db_path=test_db,
+            reports_dir=reports_dir,
+        )
+
+    assert reply == "AI agents are autonomous programs that can take actions."
+
+
+# TEST: generate_reply_with_tools returns None on failure, enabling fallback
+def test_generate_reply_with_tools_failure(test_db, reports_dir):
+    from research.chat_handler import generate_reply_with_tools
+    import requests as req
+
+    with patch("research.tools.ollama_chat", side_effect=req.ConnectionError("Ollama down")):
+        reply = generate_reply_with_tools(
+            "what's new?",
+            db_path=test_db,
+            reports_dir=reports_dir,
+        )
+
+    assert reply is None
+
+
+# TEST: handle_message falls back to manual routing when tool calling fails
+def test_handle_message_tool_fallback(test_db, reports_dir):
+    from research.chat_handler import handle_message
+    import requests as req
+
+    # Tool calling fails (Ollama connection error)
+    # Fallback generate_reply also needs to be mocked
+    mock_ollama_resp = MagicMock()
+    mock_ollama_resp.status_code = 200
+    mock_ollama_resp.json.return_value = {
+        "response": "Here is the fallback reply about AI."
+    }
+
+    mock_send_result = MagicMock()
+    mock_send_result.returncode = 0
+
+    with patch("research.tools.ollama_chat", side_effect=req.ConnectionError), \
+         patch("research.chat_handler.requests.post", return_value=mock_ollama_resp), \
+         patch("research.chat_handler.subprocess.run", return_value=mock_send_result) as mock_send:
+        result = handle_message(
+            {"text": "tell me about AI", "is_from_me": False, "sender": "+12104265298"},
+            db_path=test_db,
+            reports_dir=reports_dir,
+        )
+
+    assert result is True
+    reply_text = mock_send.call_args[0][0][-1]
+    assert "fallback reply" in reply_text.lower() or "AI" in reply_text
