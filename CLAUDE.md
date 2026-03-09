@@ -1,7 +1,16 @@
-# OpenClaw + Ollama + Qwen3 32B: Local Overnight Research Agent
+# Local Overnight Research Agent (Ollama + Qwen3.5)
 Implementation Plan — Test-Driven Development
 Hardware: Apple M1 Pro, 32GB RAM, 200GB/s memory bandwidth
 Goal: Autonomous overnight agent that scrapes ~100-200 tweets, ~100 websites, ~100 GitHub READMEs nightly, producing a personalized AI research report with persistent memory that improves over days/weeks.
+
+## Current Model Configuration (as of 2026-03-09)
+
+| Role | Model | Size | Used by |
+|------|-------|------|---------|
+| Batch (summarizer, synthesis, orchestrate) | `qwen3.5:27b` | 17 GB | `summarizer.py`, `synthesis.py`, `orchestrate.py` |
+| Interactive (chat, tools, user memory) | `qwen3.5:9b` | 6.6 GB | `chat_handler.py`, `tools.py`, `user_memory.py` |
+
+**Note:** Qwen3.5 models do NOT support the `/no_think` prefix. All prompts use standard formatting. Old Qwen3 models (8B, 32B) have been removed from Ollama.
 
 ## Architecture Overview
 ```
@@ -18,8 +27,8 @@ Goal: Autonomous overnight agent that scrapes ~100-200 tweets, ~100 websites, ~1
                        │
 ┌──────────────────────▼──────────────────────────────┐
 │               OLLAMA (llama-server)                  │
-│     Qwen3 32B Q4_K_M (~20GB RAM) via localhost      │
-│     Context: 16384 tokens (stripped workspace)       │
+│     Qwen3.5 27B Q4_K_M (~17GB RAM) via localhost    │
+│     + Qwen3.5 9B for interactive chat (~6.6GB)      │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
@@ -50,10 +59,10 @@ Goal: Autonomous overnight agent that scrapes ~100-200 tweets, ~100 websites, ~1
 | Component | RAM |
 |---|---|
 | macOS + system processes | ~4GB |
-| Ollama + Qwen3 32B Q4_K_M | ~20GB |
+| Ollama + Qwen3.5 27B Q4_K_M | ~17GB |
 | OpenClaw gateway + Node.js | ~1GB |
 | Browser (if needed, headless Chromium) | ~2GB |
-| Headroom for fetch/parse buffers | ~5GB |
+| Headroom for fetch/parse buffers | ~8GB |
 
 ---
 
@@ -675,91 +684,130 @@ All 10 orchestrator tests passed in 6.46s.
 
 ## CHUNK 9: Two-Way iMessage Interaction + Dual Model Setup
 
-**Date completed:** 2026-02-25 (partially — reply delivery still unreliable)
+**Date completed:** 2026-02-25 (partially — reply delivery still unreliable via OpenClaw/BlueBubbles)
 
 ### Purpose
-Enable two-way iMessage interaction so the user can reply to nightly reports with follow-up questions. The OpenClaw gateway receives incoming iMessages via BlueBubbles webhook, invokes an agent, and replies.
+Enable two-way iMessage interaction so the user can reply to nightly reports with follow-up questions.
 
 ### What was done
 
 **Dual model architecture:**
-- **Qwen3 8B** — Used by OpenClaw gateway agent for interactive iMessage chat (fast, ~100s per response through OpenClaw)
-- **Qwen3 32B** — Used by overnight research pipeline via direct Ollama API (no OpenClaw overhead)
-- Models configured independently: OpenClaw config sets `agents.defaults.model.primary: "ollama/qwen3:8b"`, research pipeline hardcodes `MODEL = "qwen3:32b"` in Python
+- **Small model** — Interactive iMessage chat (fast responses)
+- **Large model** — Overnight research pipeline via direct Ollama API
+- Models configured independently in Python code (`MODEL = "..."` constants)
 
-**OpenClaw configuration changes:**
-- `channels.bluebubbles.dmPolicy`: Changed from `"pairing"` to `"allowlist"`
-- `channels.bluebubbles.allowFrom`: `["+12104265298"]`
-- `channels.bluebubbles.serverUrl`: Changed from `http://192.168.1.184:1234` to `http://localhost:1234` (more reliable — both run on same Mac)
-- `agents.defaults.model.primary`: Changed from `"ollama/qwen3:32b"` to `"ollama/qwen3:8b"`
-- `agents.defaults.timeoutSeconds`: Increased from 300 to 600
-- `models.providers.ollama.models`: Added `qwen3:8b` alongside `qwen3:32b`, both with `contextWindow: 32768`
+**iMessage delivery evolved through several approaches:**
+1. BlueBubbles + OpenClaw webhook (unreliable — AppleScript timeouts, server crashes)
+2. `imsg` CLI tool (replaced BlueBubbles for message sending, more reliable)
+3. Separate launchd agents: `imsg watch` for message reception, `chat_daemon` for processing
 
-**BlueBubbles configuration (manual):**
-- Webhook URL: `http://127.0.0.1:18789/bluebubbles-webhook?password=warmDayInJanuary`
-- Event subscription: "New Messages"
-- Private API: **Disabled** (requires SIP disabled; AppleScript fallback used instead)
-- Webhook requires `?password=` query param even for loopback (CVE-2026-26316 fix in OpenClaw v2026.2.21-2)
+**Key files:**
+- `research/chat_daemon.py` — Entry point, tails `imsg watch` NDJSON output
+- `research/chat_handler.py` — Message processing, LLM calls, reply sending
+- `research/user_memory.py` — Extracts user preferences from messages
 
-**Agent workspace (`~/.openclaw/workspace/AGENTS.md`):**
-- Instructs agent to reply directly (never use `write` tool)
-- Never use `web_search` — all answers from local reports and SQLite DB
-- Read reports from `~/reports/` and query `research/research.db`
-- Keep responses iMessage-friendly (2-3 short paragraphs)
+**LaunchAgent configuration:**
+- `com.research.imsg-watcher.plist` — `imsg watch --chat-id 4 --json` (phone thread)
+- `com.research.imsg-watcher-email.plist` — `imsg watch --chat-id 5 --json` (email thread)
+- `com.research.chat-daemon.plist` — Python chat daemon tailing watch output
 
-**Files modified in project:**
-- `research/synthesis.py` — Increased `_llm_call` timeout from 180s to 600s, increased `num_ctx` from 8192 to 16384 (clustering 189 summaries needs more context and time)
-- `run.sh` — Updated `OLLAMA_CONTEXT_LENGTH` from 16384 to 32768
-- `com.research.nightly.plist` — Updated `OLLAMA_CONTEXT_LENGTH` from 16384 to 32768
-
-**Files outside project (OpenClaw workspace):**
-- `~/.openclaw/workspace/AGENTS.md` — Rewritten for iMessage chat agent
-- `~/.openclaw/workspace/TOOLS.md` — Stripped to 3 tools (exec, read, message)
-- `~/.openclaw/openclaw.json` — Multiple config changes via `openclaw config set`
-
-### What works
-- Webhook auth: BlueBubbles → OpenClaw gateway via `?password=` param
-- Message reception: OpenClaw receives DMs from allowlisted number
-- Agent invocation: Gateway spawns Qwen3 8B agent on incoming message
-- Agent completion: 8B model responds in ~100s through OpenClaw agent layer
-- One successful reply delivered via iMessage (03:32 UTC, Feb 25)
-
-### Known Issues / Needs Debugging
-- **Reply delivery unreliable**: Agent completes successfully (`isError=false`) but iMessage reply often doesn't arrive. Possible causes:
-  - BlueBubbles REST API hangs on send (AppleScript timeout) but sometimes still delivers
-  - BlueBubbles app goes to sleep/crashes, becoming unreachable
-  - OpenClaw logs "BlueBubbles final reply failed: TypeError: fetch failed" when BlueBubbles is down
-- **BlueBubbles Private API**: Disabled because SIP is enabled. Typing indicators fail (cosmetic only). AppleScript fallback is slow and unreliable for programmatic sends.
-- **BlueBubbles LAN IP instability**: Server was initially at `192.168.1.184:1234` but became unreachable after restart. Fixed by switching to `localhost:1234`.
-- **Ollama model swapping**: When midnight pipeline runs, it needs 32B but 8B may be loaded (from chat). Ollama swaps models but this adds latency. The synthesis step timed out on first nightly run because of this.
-- **Nightly pipeline Feb 25**: Fetch + summarize succeeded (189 items in 90 min). Synthesis failed on first automatic run (Ollama timeout during model swap). Re-run manually succeeded — report saved to `~/reports/2026-02-25.md`.
-
-### Nightly Pipeline Run Results (Feb 25)
-
-| Step | Result | Duration | Notes |
-|---|---|---|---|
-| Pre-flight checks | **PASS** | <1s | Ollama running, 32B available, 109GB free |
-| Fetch sources | **PASS** | ~26s | 189 sources fetched |
-| Summarize | **PASS** | ~90 min | 189 summaries via Qwen3 32B |
-| Build memory context | **PASS** | <1s | From SQLite DB |
-| Synthesize report | **FAIL** (auto), **PASS** (manual re-run) | 8 min | Ollama timeout during model swap; manual re-run produced 5 themes |
-| Save report | **PASS** (manual) | <1s | `~/reports/2026-02-25.md` |
-| iMessage notification | **Uncertain** | - | Sent via CLI, got 500 quirk response |
+**iMessage chat threading:**
+- chat_id 4 (phone number thread): `is_from_me` reliably distinguishes direction
+- chat_id 5 (email thread): both directions show `is_from_me=true` (same iCloud account)
+- Agent replies sent via `imsg send --to` go through chat_id 4
+- User messages from phone may arrive on either chat_id 4 or 5
 
 ### Configuration Reference
-
-**OpenClaw (`~/.openclaw/openclaw.json`) key settings:**
-```json
-{
-  "channels.bluebubbles.serverUrl": "http://localhost:1234",
-  "channels.bluebubbles.dmPolicy": "allowlist",
-  "channels.bluebubbles.allowFrom": ["+12104265298"],
-  "agents.defaults.model.primary": "ollama/qwen3:8b",
-  "agents.defaults.timeoutSeconds": 600
-}
-```
 
 **Ollama env vars (must be set at launch):**
 ```bash
 OLLAMA_CONTEXT_LENGTH=32768 OLLAMA_FLASH_ATTENTION=1 OLLAMA_NUM_PARALLEL=1
 ```
+
+---
+
+## CHUNK 10: LLM Tool Calling for iMessage Bot
+
+**Date completed:** 2026-03-03
+
+### Purpose
+Replace brittle regex routing (`detect_fetch_request()`) with real LLM tool calling via Ollama's `/api/chat` endpoint, allowing the model to autonomously decide which tools to use.
+
+### What was done
+
+**Files created:**
+- `research/tools.py` — Tool registry and agentic execution loop:
+  - 5 tools: `fetch_url`, `fetch_hacker_news`, `fetch_github_readme`, `search_research_db`, `get_trending_topics`
+  - `TOOL_DEFINITIONS` — OpenAI-format tool schemas for Ollama
+  - `execute_tool(name, arguments, db_path)` — Dispatches to existing fetcher/db functions
+  - `run_tool_loop(model, messages, caller, db_path, max_iterations=3)` — Agentic loop: call model → execute tool calls → feed results back → repeat
+  - Client-side tool name validation (Ollama can hallucinate tool names)
+- `tests/test_tools.py` — 8 tests covering tool definitions, execution, and loop behavior
+
+**Files modified:**
+- `research/gpu_timesheet.py` — Added `ollama_chat()` for `/api/chat` endpoint with tool support
+- `research/chat_handler.py` — Added `generate_reply_with_tools()`, rewired `handle_message()` to try tool-calling first with fallback to manual regex routing
+
+**Key design decisions:**
+- Uses `stream: false` (tool calls silently fail with streaming)
+- Low temperature (0.1) minimizes hallucinated tool calls
+- Max 3 tool loop iterations (~60s worst case)
+- Tool results truncated to 2000 chars
+- Fallback path preserved: if tool calling fails, falls back to `detect_fetch_request()` regex routing
+
+### Test Results
+All 8 tool tests + 3 chat handler tests pass.
+
+---
+
+## CHUNK 11: Qwen3.5 Model Upgrade + iMessage Bug Fixes
+
+**Date completed:** 2026-03-09
+
+### Purpose
+Upgrade from Qwen3 to Qwen3.5 models (better benchmarks, smaller size) and fix two iMessage bugs.
+
+### What was done
+
+**Model upgrade:**
+- Updated Ollama from 0.17.0 to 0.17.5
+- Pulled `qwen3.5:9b` (6.6 GB) — replaces `qwen3:8b` for interactive chat
+- Pulled `qwen3.5:27b` (17 GB) — replaces `qwen3:32b` for batch pipeline (3 GB smaller, better benchmarks)
+- Removed old models: `qwen3:8b` (5.2 GB), `qwen3:32b` (20 GB) — freed ~25 GB
+- Removed all `/no_think` prefixes (unsupported by Qwen3.5)
+
+**Benchmark comparison (Qwen3.5 27B vs Qwen3 32B):**
+
+| Benchmark | Qwen3 32B | Qwen3.5 27B |
+|-----------|-----------|-------------|
+| MMLU-Pro | 81.4 | 86.1 |
+| BFCL-V4 (tool calling) | 64.2 | 68.5 |
+| IFEval | 88.2 | 95.0 |
+| HumanEval+ | 79.3 | 84.1 |
+| Ollama Q4_K_M size | 20 GB | 17 GB |
+
+**Bug fix 1 — Pytest sending real iMessages:**
+- `test_orchestrate_partial_failure` was not mocking `send_notification()`
+- Every pytest run sent a real "No data available" iMessage to the user's phone
+- Fixed by adding `patch("research.orchestrate.send_notification", return_value=True)`
+
+**Bug fix 2 — Chat daemon ignoring phone messages on chat_id 5:**
+- Messages from phone on email thread (chat_id 5) have `is_from_me=true`
+- Daemon was filtering these out, silently dropping user messages
+- Fixed: only apply `is_from_me` filter on chat_id 4; accept all chat_id 5 messages
+- Added echo detection: cache sent reply text (first 100 chars, 2 min TTL) to filter echoed agent replies on chat_id 5
+
+**Files modified:**
+- `research/chat_handler.py` — Model swap, `/no_think` removal, chat_id 5 fix, echo detection
+- `research/tools.py` — Model swap to `qwen3.5:9b`
+- `research/user_memory.py` — Model swap, `/no_think` removal
+- `research/summarizer.py` — Model swap to `qwen3.5:27b`, `/no_think` removal
+- `research/synthesis.py` — Model swap, `/no_think` removal
+- `research/orchestrate.py` — Health check model swap, `/no_think` removal
+- `research/gpu_timesheet.py` — Docstring update
+- `run.sh` — Pre-flight check updated for `qwen3.5:27b`
+- `tests/test_chat_handler.py` — Model assertion update, new chat_id 5 acceptance test
+- `tests/test_orchestrate.py` — Mock `send_notification` in partial failure test
+
+### Test Results
+All 82 tests pass (1 expected failure for unloaded launchd plist).
