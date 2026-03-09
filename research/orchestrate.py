@@ -264,8 +264,8 @@ def run_health_check():
             resp = requests.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={
-                    "model": "qwen3:32b",
-                    "prompt": "/no_think Say OK",
+                    "model": "qwen3.5:27b",
+                    "prompt": "Say OK",
                     "stream": False,
                     "options": {"num_ctx": 512},
                 },

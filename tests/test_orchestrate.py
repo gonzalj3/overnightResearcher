@@ -215,7 +215,8 @@ output:
 
     with patch("research.orchestrate.run_fetch_pipeline", return_value=str(raw_dir)), \
          patch("research.orchestrate.run_batch_summarize", return_value=mock_summary_result), \
-         patch("research.orchestrate.run_synthesis", return_value=mock_synthesis):
+         patch("research.orchestrate.run_synthesis", return_value=mock_synthesis), \
+         patch("research.orchestrate.send_notification", return_value=True):
         report_path = run_nightly_research(
             sources_override={"max_total": 5},
             db_path=str(tmp_path / "test.db"),

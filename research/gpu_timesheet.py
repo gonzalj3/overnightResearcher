@@ -90,7 +90,7 @@ def ollama_chat(model, messages, caller, tools=None, timeout=120, options=None):
     """Call Ollama /api/chat with optional tool calling support.
 
     Args:
-        model: Ollama model name (e.g. "qwen3:8b")
+        model: Ollama model name (e.g. "qwen3.5:9b")
         messages: list of {role, content} dicts
         caller: Timesheet identifier
         tools: list of OpenAI-format tool definitions (optional)

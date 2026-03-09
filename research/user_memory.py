@@ -20,7 +20,7 @@ from research.json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
-MODEL = "qwen3:8b"  # Use 8B for fast fact extraction (already loaded for chat)
+MODEL = "qwen3.5:9b"  # Use 9B for fast fact extraction (already loaded for chat)
 
 
 def save_message(db_path, text, sender):
@@ -45,8 +45,7 @@ def extract_facts_from_message(text, existing_facts=None):
         lines = [f"- [id={f['id']}] ({f['fact_type']}) {f['fact_text']}" for f in existing_facts[:20]]
         existing_summary = "\n".join(lines)
 
-    prompt = f"""/no_think
-Extract user preferences, interests, or facts from this message.
+    prompt = f"""Extract user preferences, interests, or facts from this message.
 Classify each as ADD (new fact), UPDATE (replaces existing fact), DELETE (user no longer cares), or NOOP (no facts).
 
 Fact types: interest, project, preference, context, dislike

@@ -65,11 +65,11 @@ else
 fi
 
 # Check model is available
-if ! curl -s "$OLLAMA_URL/api/tags" | grep -q "qwen3:32b"; then
-    echo "FAIL: qwen3:32b model not found. Run: ollama pull qwen3:32b"
+if ! curl -s "$OLLAMA_URL/api/tags" | grep -q "qwen3.5:27b\|qwen3.5-27b"; then
+    echo "FAIL: qwen3.5:27b model not found. Run: ollama pull qwen3.5:27b"
     exit 1
 fi
-echo "  Model qwen3:32b: OK"
+echo "  Model qwen3.5:27b: OK"
 
 # Disk space check
 DISK_FREE_GB=$(df -g "$HOME" | tail -1 | awk '{print $4}')

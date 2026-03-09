@@ -57,7 +57,7 @@ def test_generate_reply_prompt(test_db, reports_dir):
     prompt = call_kwargs["prompt"]
     assert "AI Research Report" in prompt
     assert "What's new with AI agents?" in prompt
-    assert call_kwargs["model"] == "qwen3:8b"
+    assert call_kwargs["model"] == "qwen3.5:9b"
 
 
 # TEST: handle_message skips own messages (is_from_me=true)
@@ -76,6 +76,32 @@ def test_handle_message_skips_own(test_db, reports_dir):
     assert result is False
     mock_ollama.assert_not_called()
     mock_send.assert_not_called()
+
+
+# TEST: handle_message accepts chat_id 5 messages (email thread from phone)
+def test_handle_message_accepts_email_chat(test_db, reports_dir):
+    from research.chat_handler import handle_message
+
+    mock_ollama_resp = MagicMock()
+    mock_ollama_resp.status_code = 200
+    mock_ollama_resp.json.return_value = {
+        "response": "Here's the latest."
+    }
+    mock_send_result = MagicMock()
+    mock_send_result.returncode = 0
+
+    with patch("research.chat_handler.requests.post", return_value=mock_ollama_resp), \
+         patch("research.chat_handler.subprocess.run", return_value=mock_send_result) as mock_send:
+        result = handle_message(
+            {"text": "Whats the latest?", "is_from_me": True,
+             "sender": "martin.jose.gonzalez@gmail.com",
+             "chat_id": 5, "destination_caller_id": "+12104265298"},
+            db_path=test_db,
+            reports_dir=reports_dir,
+        )
+
+    assert result is True
+    mock_send.assert_called_once()
 
 
 # TEST: handle_message processes incoming and sends reply

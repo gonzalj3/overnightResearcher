@@ -10,7 +10,7 @@ from research.json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
-MODEL = "qwen3:32b"
+MODEL = "qwen3.5:27b"
 
 
 def _llm_call(prompt, system="You are a research analyst. Output valid JSON only.",
@@ -75,8 +75,7 @@ def cluster_and_rank(summaries, top_n=10, stale_hashes=None, focus_tags=None):
         })
     compact = compact[:top_n * 2]  # send more than top_n for grouping
 
-    prompt = f"""/no_think
-Group these research items by theme. Select the top {top_n} most relevant items.
+    prompt = f"""Group these research items by theme. Select the top {top_n} most relevant items.
 Return JSON: {{"clusters": [{{"theme": "Theme Name", "items": [{{"title": "...", "summary": "..."}}]}}]}}
 
 Items:
@@ -119,8 +118,7 @@ def synthesize_theme(cluster, memory_context=""):
     )
     theme = cluster.get("theme", "Research Findings")
 
-    prompt = f"""/no_think
-Write a concise analysis paragraph (3-5 sentences) about this research theme.
+    prompt = f"""Write a concise analysis paragraph (3-5 sentences) about this research theme.
 
 Theme: {theme}
 
@@ -147,8 +145,7 @@ def generate_executive_summary(theme_analyses, memory_context=""):
         for ta in theme_analyses
     )
 
-    prompt = f"""/no_think
-Based on these research theme analyses, produce:
+    prompt = f"""Based on these research theme analyses, produce:
 1. An executive summary (3-5 bullet points of the most important findings)
 2. A watch list (2-4 items/trends to follow up on tomorrow)
 

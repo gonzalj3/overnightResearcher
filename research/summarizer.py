@@ -11,13 +11,12 @@ from research.json_repair import repair_json
 
 logger = logging.getLogger(__name__)
 
-MODEL = "qwen3:32b"
+MODEL = "qwen3.5:27b"
 DEFAULT_INTERESTS = ["AI agents", "local LLM inference"]
 
 SYSTEM_PROMPT = "You are a research summarizer. Output valid JSON only."
 
-USER_TEMPLATE = """/no_think
-Summarize this content. Respond with ONLY this JSON:
+USER_TEMPLATE = """Summarize this content. Respond with ONLY this JSON:
 {{"title":"...", "summary":"2-3 sentences", "relevance_tags":["tag1","tag2"], "relevance_score": 0.0-1.0, "key_developments":["point1","point2"]}}
 
 User interests: {interests}

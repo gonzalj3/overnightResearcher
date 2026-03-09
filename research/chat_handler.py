@@ -17,11 +17,18 @@ from research.tools import run_tool_loop, TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
-MODEL = "qwen3:8b"
+MODEL = "qwen3.5:9b"
 IMESSAGE_TARGET = "+12104265298"
 PHONE_CHAT_ID = 4   # chat with phone number identifier — agent sends replies here
 EMAIL_CHAT_ID = 5    # chat with email identifier — user sends questions from phone here
 MAX_REPLY_CHARS = 1500
+
+# Track recently sent replies to detect echoes on chat_id 5.
+# When agent sends a reply, it appears on chat_id 4 AND echoes on chat_id 5.
+# We store the first 100 chars of each sent reply to filter echoes.
+_recent_replies = []  # list of (timestamp, text_prefix) tuples
+_REPLY_CACHE_MAX = 20
+_REPLY_CACHE_TTL = 120  # seconds
 
 
 def _truncate_reply(text, max_chars=MAX_REPLY_CHARS):
@@ -183,8 +190,7 @@ def _handle_hn_request(topic, query):
         stories_text = "\n".join(
             f"- {s['title']} (score: {s['score']})" for s in stories
         )
-        prompt = f"""/no_think
-From these Hacker News stories, pick the ones related to "{topic}". Return ONLY a JSON array of the matching story titles, e.g. ["title1", "title2"]. If none match, return [].
+        prompt = f"""From these Hacker News stories, pick the ones related to "{topic}". Return ONLY a JSON array of the matching story titles, e.g. ["title1", "title2"]. If none match, return [].
 
 {stories_text}"""
         try:
@@ -255,8 +261,7 @@ def _summarize_fetched_content(content, query, url=""):
     if len(content) > 4000:
         truncated += "\n...(truncated)"
 
-    prompt = f"""/no_think
-You fetched this web page{' from ' + url if url else ''}. The user asked: "{query}"
+    prompt = f"""You fetched this web page{' from ' + url if url else ''}. The user asked: "{query}"
 
 Extract the most relevant information and summarize it concisely for iMessage (2-3 short paragraphs). Include any key links, names, or numbers.
 
@@ -289,7 +294,6 @@ def generate_reply_with_tools(question, db_path="research/research.db",
     Returns reply string, or None on failure.
     """
     system = (
-        "/no_think\n"
         "You are a helpful AI research assistant. You have tools to fetch web pages, "
         "check Hacker News, read GitHub READMEs, and search a local research database. "
         "Use tools when the user asks for live data. For general questions, answer directly. "
@@ -342,8 +346,7 @@ def generate_reply(question, db_path="research/research.db", reports_dir="~/repo
     # Truncate report to leave room for prompt + response
     report_excerpt = report_text[:3000] if report_text else "No report available today."
 
-    prompt = f"""/no_think
-You are a helpful AI research assistant. Answer the user's question based on the research data below. Keep your answer concise (2-3 short paragraphs) and iMessage-friendly.
+    prompt = f"""You are a helpful AI research assistant. Answer the user's question based on the research data below. Keep your answer concise (2-3 short paragraphs) and iMessage-friendly.
 
 {user_profile}
 
@@ -391,16 +394,35 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
     Returns:
         True if reply was sent, False otherwise.
     """
-    # Skip messages sent from this Mac (agent replies).
-    # Messages from the phone arrive with is_from_me=false on chat_id 4.
-    if message_dict.get("is_from_me", False):
-        logger.debug("Skipping own message (is_from_me=true)")
+    # Filter out agent replies (messages sent by this Mac).
+    # chat_id 4 (phone thread): is_from_me reliably distinguishes direction.
+    # chat_id 5 (email thread): both directions show is_from_me=true because
+    # it's the same iCloud account. We detect echoed agent replies by matching
+    # against recently sent reply text.
+    chat_id = message_dict.get("chat_id")
+    if chat_id != EMAIL_CHAT_ID and message_dict.get("is_from_me", False):
+        logger.debug("Skipping own message (is_from_me=true, chat_id=%s)", chat_id)
         return False
 
     text = message_dict.get("text", "").strip()
     if not text:
         logger.debug("Skipping empty message")
         return False
+
+    # Detect echoed agent replies on chat_id 5 by matching against recent sends.
+    if chat_id == EMAIL_CHAT_ID:
+        now = time.time()
+        # Clean expired entries
+        _recent_replies[:] = [
+            (ts, prefix) for ts, prefix in _recent_replies
+            if now - ts < _REPLY_CACHE_TTL
+        ]
+        # Strip any binary prefixes (imsg adds control chars) for comparison
+        clean_text = text.lstrip('\x00\x01\x02\x03\x04\x05').strip()
+        for _, prefix in _recent_replies:
+            if clean_text[:80] == prefix[:80]:
+                logger.debug("Skipping echoed agent reply on chat_id 5")
+                return False
 
     sender = message_dict.get("sender", IMESSAGE_TARGET)
     logger.info("Incoming message from %s: %s", sender, text[:80])
@@ -429,6 +451,10 @@ def handle_message(message_dict, db_path="research/research.db", reports_dir="~/
         if result.returncode == 0:
             logger.info("Reply sent to %s", sender)
             sent = True
+            # Cache reply text to detect echoes on chat_id 5
+            _recent_replies.append((time.time(), reply.strip()[:100]))
+            if len(_recent_replies) > _REPLY_CACHE_MAX:
+                _recent_replies.pop(0)
         else:
             logger.error("imsg send failed (exit %d): %s", result.returncode, result.stderr)
     except FileNotFoundError:

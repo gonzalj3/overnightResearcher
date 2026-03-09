@@ -8,7 +8,7 @@ from research.gpu_timesheet import ollama_chat
 
 logger = logging.getLogger(__name__)
 
-MODEL = "qwen3:8b"
+MODEL = "qwen3.5:9b"
 
 TOOL_DEFINITIONS = [
     {
